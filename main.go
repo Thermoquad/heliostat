@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"time"
 	"unsafe"
 
@@ -43,6 +44,7 @@ const (
 	MSG_PING_REQUEST       = 0x13
 	MSG_SET_TIMEOUT_CONFIG = 0x14
 	MSG_EMERGENCY_STOP     = 0x15
+	MSG_TELEMETRY_CONFIG   = 0x16
 
 	// Data (ICU → Master)
 	MSG_STATE_DATA       = 0x20
@@ -245,6 +247,8 @@ func formatMessageType(msgType uint8) string {
 		return "SET_TIMEOUT_CONFIG"
 	case MSG_EMERGENCY_STOP:
 		return "EMERGENCY_STOP"
+	case MSG_TELEMETRY_CONFIG:
+		return "TELEMETRY_CONFIG"
 
 	// Data
 	case MSG_STATE_DATA:
@@ -286,7 +290,7 @@ func formatPayload(msgType uint8, payload []byte) string {
 		if len(payload) >= 8 {
 			uptime := uint64(payload[0]) | uint64(payload[1])<<8 | uint64(payload[2])<<16 | uint64(payload[3])<<24 |
 				uint64(payload[4])<<32 | uint64(payload[5])<<40 | uint64(payload[6])<<48 | uint64(payload[7])<<56
-			return fmt.Sprintf("  Uptime: %d ms (%.2f sec)\n", uptime, float64(uptime)/1000.0)
+			return fmt.Sprintf("  Uptime: %s\n", formatDuration(uptime))
 		}
 
 	case MSG_SET_MODE:
@@ -316,29 +320,38 @@ func formatPayload(msgType uint8, payload []byte) string {
 		}
 
 	case MSG_TELEMETRY_BUNDLE:
-		if len(payload) >= 4 {
-			state := payload[0]
-			errorCode := payload[1]
-			motorCount := payload[2]
-			tempCount := payload[3]
+		if len(payload) >= 7 {
+			state := uint32(payload[0]) | uint32(payload[1])<<8 | uint32(payload[2])<<16 | uint32(payload[3])<<24
+			errorCode := payload[4]
+			motorCount := payload[5]
+			tempCount := payload[6]
 
-			result := fmt.Sprintf("  State: 0x%02X, Error: 0x%02X, Motors: %d, Temps: %d\n", state, errorCode, motorCount, tempCount)
-
-			offset := 4
-			for i := 0; i < int(motorCount) && offset+7 <= len(payload); i++ {
-				rpm := uint32(payload[offset]) | uint32(payload[offset+1])<<8 | uint32(payload[offset+2])<<16 | uint32(payload[offset+3])<<24
-				targetRPM := uint32(payload[offset+4]) | uint32(payload[offset+5])<<8 | uint32(payload[offset+6])<<16 | uint32(payload[offset+7])<<24
-				pwm := payload[offset+8]
-				result += fmt.Sprintf("    Motor %d: RPM=%d, Target=%d, PWM=%d%%\n", i, rpm, targetRPM, pwm)
-				offset += 9
+			stateNames := []string{"INITIALIZING", "IDLE", "BLOWING", "PREHEAT", "PREHEAT_STAGE_2", "HEATING", "COOLING", "ERROR", "E_STOP"}
+			stateName := "UNKNOWN"
+			if int(state) < len(stateNames) {
+				stateName = stateNames[state]
 			}
 
-			for i := 0; i < int(tempCount) && offset+3 <= len(payload); i++ {
-				// Temperature is float32 (4 bytes, little-endian)
-				tempBits := uint32(payload[offset]) | uint32(payload[offset+1])<<8 | uint32(payload[offset+2])<<16 | uint32(payload[offset+3])<<24
-				temp := float32frombits(tempBits)
+			result := fmt.Sprintf("  State: %s (0x%02X), Error: 0x%02X, Motors: %d, Temps: %d\n", stateName, state, errorCode, motorCount, tempCount)
+
+			offset := 7
+
+			// Parse motor data (12 bytes each: rpm, target, pwm_duty)
+			for i := 0; i < int(motorCount) && offset+11 <= len(payload); i++ {
+				rpm := int32(uint32(payload[offset]) | uint32(payload[offset+1])<<8 | uint32(payload[offset+2])<<16 | uint32(payload[offset+3])<<24)
+				targetRPM := int32(uint32(payload[offset+4]) | uint32(payload[offset+5])<<8 | uint32(payload[offset+6])<<16 | uint32(payload[offset+7])<<24)
+				pwmDuty := int32(uint32(payload[offset+8]) | uint32(payload[offset+9])<<8 | uint32(payload[offset+10])<<16 | uint32(payload[offset+11])<<24)
+				result += fmt.Sprintf("    Motor %d: RPM=%d (target=%d), PWM=%d ns\n", i, rpm, targetRPM, pwmDuty)
+				offset += 12
+			}
+
+			// Parse temperature data (8 bytes each: f64)
+			for i := 0; i < int(tempCount) && offset+7 <= len(payload); i++ {
+				tempBits := uint64(payload[offset]) | uint64(payload[offset+1])<<8 | uint64(payload[offset+2])<<16 | uint64(payload[offset+3])<<24 |
+					uint64(payload[offset+4])<<32 | uint64(payload[offset+5])<<40 | uint64(payload[offset+6])<<48 | uint64(payload[offset+7])<<56
+				temp := float64frombits(tempBits)
 				result += fmt.Sprintf("    Temp %d: %.1f°C\n", i, temp)
-				offset += 4
+				offset += 8
 			}
 
 			return result
@@ -354,6 +367,73 @@ func formatPayload(msgType uint8, payload []byte) string {
 		if len(payload) >= 4 {
 			rpm := uint32(payload[0]) | uint32(payload[1])<<8 | uint32(payload[2])<<16 | uint32(payload[3])<<24
 			return fmt.Sprintf("  Target RPM: %d\n", rpm)
+		}
+
+	case MSG_TELEMETRY_CONFIG:
+		if len(payload) >= 12 {
+			enabled := uint32(payload[0]) | uint32(payload[1])<<8 | uint32(payload[2])<<16 | uint32(payload[3])<<24
+			interval := uint32(payload[4]) | uint32(payload[5])<<8 | uint32(payload[6])<<16 | uint32(payload[7])<<24
+			mode := uint32(payload[8]) | uint32(payload[9])<<8 | uint32(payload[10])<<16 | uint32(payload[11])<<24
+
+			enabledStr := "Disabled"
+			if enabled != 0 {
+				enabledStr = "Enabled"
+			}
+
+			modeStr := "Bundled"
+			if mode != 0 {
+				modeStr = "Individual"
+			}
+
+			return fmt.Sprintf("  Telemetry: %s, Interval: %d ms, Mode: %s\n", enabledStr, interval, modeStr)
+		}
+
+	case MSG_MOTOR_DATA:
+		if len(payload) >= 32 {
+			motor := int32(uint32(payload[0]) | uint32(payload[1])<<8 | uint32(payload[2])<<16 | uint32(payload[3])<<24)
+			timestamp := uint32(payload[4]) | uint32(payload[5])<<8 | uint32(payload[6])<<16 | uint32(payload[7])<<24
+			rpm := int32(uint32(payload[8]) | uint32(payload[9])<<8 | uint32(payload[10])<<16 | uint32(payload[11])<<24)
+			target := int32(uint32(payload[12]) | uint32(payload[13])<<8 | uint32(payload[14])<<16 | uint32(payload[15])<<24)
+			maxRPM := int32(uint32(payload[16]) | uint32(payload[17])<<8 | uint32(payload[18])<<16 | uint32(payload[19])<<24)
+			minRPM := int32(uint32(payload[20]) | uint32(payload[21])<<8 | uint32(payload[22])<<16 | uint32(payload[23])<<24)
+			pwm := int32(uint32(payload[24]) | uint32(payload[25])<<8 | uint32(payload[26])<<16 | uint32(payload[27])<<24)
+			pwmMax := int32(uint32(payload[28]) | uint32(payload[29])<<8 | uint32(payload[30])<<16 | uint32(payload[31])<<24)
+
+			return fmt.Sprintf("  Motor %d: RPM=%d (target=%d), Range=[%d-%d], PWM=%dns/%dns, Time=%d µs\n",
+				motor, rpm, target, minRPM, maxRPM, pwm, pwmMax, timestamp)
+		}
+
+	case MSG_TEMPERATURE_DATA:
+		if len(payload) >= 32 {
+			thermometer := int32(uint32(payload[0]) | uint32(payload[1])<<8 | uint32(payload[2])<<16 | uint32(payload[3])<<24)
+			timestamp := uint32(payload[4]) | uint32(payload[5])<<8 | uint32(payload[6])<<16 | uint32(payload[7])<<24
+
+			// Temperature is f64 (8 bytes, little-endian)
+			tempBits := uint64(payload[8]) | uint64(payload[9])<<8 | uint64(payload[10])<<16 | uint64(payload[11])<<24 |
+				uint64(payload[12])<<32 | uint64(payload[13])<<40 | uint64(payload[14])<<48 | uint64(payload[15])<<56
+			temp := float64frombits(tempBits)
+
+			pidEnabled := payload[16]
+			rpmCtrlEnabled := payload[17]
+			watchedMotor := int32(uint32(payload[18]) | uint32(payload[19])<<8 | uint32(payload[20])<<16 | uint32(payload[21])<<24)
+
+			// Target temp is f64 (8 bytes)
+			targetBits := uint64(payload[22]) | uint64(payload[23])<<8 | uint64(payload[24])<<16 | uint64(payload[25])<<24 |
+				uint64(payload[26])<<32 | uint64(payload[27])<<40 | uint64(payload[28])<<48 | uint64(payload[29])<<56
+			targetTemp := float64frombits(targetBits)
+
+			pidStr := "Off"
+			if pidEnabled != 0 {
+				pidStr = "On"
+			}
+
+			rpmStr := "Off"
+			if rpmCtrlEnabled != 0 {
+				rpmStr = "On"
+			}
+
+			return fmt.Sprintf("  Thermometer %d: %.1f°C (target=%.1f°C), PID=%s, RPM_Ctrl=%s, Motor=%d, Time=%d µs\n",
+				thermometer, temp, targetTemp, pidStr, rpmStr, watchedMotor, timestamp)
 		}
 
 	case MSG_ERROR_INVALID_CRC:
@@ -385,9 +465,96 @@ func formatPayload(msgType uint8, payload []byte) string {
 	return result + "\n"
 }
 
+// formatDuration converts milliseconds to human-readable duration
+func formatDuration(ms uint64) string {
+	seconds := ms / 1000
+	if seconds == 0 {
+		return "0 seconds"
+	}
+
+	const (
+		secondsPerMinute = 60
+		secondsPerHour   = 60 * secondsPerMinute
+		secondsPerDay    = 24 * secondsPerHour
+		secondsPerYear   = 365 * secondsPerDay
+	)
+
+	years := seconds / secondsPerYear
+	seconds %= secondsPerYear
+
+	days := seconds / secondsPerDay
+	seconds %= secondsPerDay
+
+	hours := seconds / secondsPerHour
+	seconds %= secondsPerHour
+
+	minutes := seconds / secondsPerMinute
+	seconds %= secondsPerMinute
+
+	parts := []string{}
+
+	if years > 0 {
+		if years == 1 {
+			parts = append(parts, "1 year")
+		} else {
+			parts = append(parts, fmt.Sprintf("%d years", years))
+		}
+	}
+
+	if days > 0 {
+		if days == 1 {
+			parts = append(parts, "1 day")
+		} else {
+			parts = append(parts, fmt.Sprintf("%d days", days))
+		}
+	}
+
+	if hours > 0 {
+		if hours == 1 {
+			parts = append(parts, "1 hour")
+		} else {
+			parts = append(parts, fmt.Sprintf("%d hours", hours))
+		}
+	}
+
+	if minutes > 0 {
+		if minutes == 1 {
+			parts = append(parts, "1 minute")
+		} else {
+			parts = append(parts, fmt.Sprintf("%d minutes", minutes))
+		}
+	}
+
+	if seconds > 0 {
+		if seconds == 1 {
+			parts = append(parts, "1 second")
+		} else {
+			parts = append(parts, fmt.Sprintf("%d seconds", seconds))
+		}
+	}
+
+	// Join parts with commas and "and"
+	if len(parts) == 0 {
+		return "0 seconds"
+	} else if len(parts) == 1 {
+		return parts[0]
+	} else if len(parts) == 2 {
+		return parts[0] + " and " + parts[1]
+	} else {
+		last := parts[len(parts)-1]
+		rest := parts[:len(parts)-1]
+		return strings.Join(rest, ", ") + ", and " + last
+	}
+}
+
 // float32frombits converts a uint32 to float32
 func float32frombits(b uint32) float32 {
 	return *(*float32)(unsafe.Pointer(&b))
+}
+
+// float64frombits converts a uint64 to float64
+func float64frombits(b uint64) float64 {
+	return *(*float64)(unsafe.Pointer(&b))
 }
 
 func main() {
