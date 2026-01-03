@@ -162,6 +162,11 @@ func (d *Decoder) DecodeByte(b byte) (*Packet, error) {
 			d.Reset()
 			return nil, fmt.Errorf("invalid length: %d", b)
 		}
+		// Protocol v1.3: Check for buffer overflow
+		if d.bufferIndex >= MAX_PACKET_SIZE {
+			d.Reset()
+			return nil, fmt.Errorf("buffer overflow at length byte")
+		}
 		d.packet = &Packet{Length: b, Payload: make([]byte, 0, b)}
 		d.buffer[d.bufferIndex] = b
 		d.bufferIndex++
@@ -169,6 +174,11 @@ func (d *Decoder) DecodeByte(b byte) (*Packet, error) {
 		return nil, nil
 
 	case STATE_TYPE:
+		// Protocol v1.3: Check for buffer overflow
+		if d.bufferIndex >= MAX_PACKET_SIZE {
+			d.Reset()
+			return nil, fmt.Errorf("buffer overflow at type byte")
+		}
 		d.packet.Type = b
 		d.buffer[d.bufferIndex] = b
 		d.bufferIndex++
@@ -180,6 +190,11 @@ func (d *Decoder) DecodeByte(b byte) (*Packet, error) {
 		return nil, nil
 
 	case STATE_PAYLOAD:
+		// Protocol v1.3: Check for buffer overflow before accepting byte
+		if d.bufferIndex >= MAX_PACKET_SIZE {
+			d.Reset()
+			return nil, fmt.Errorf("buffer overflow: packet exceeds max size")
+		}
 		d.packet.Payload = append(d.packet.Payload, b)
 		d.buffer[d.bufferIndex] = b
 		d.bufferIndex++
