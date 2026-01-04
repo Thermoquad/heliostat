@@ -27,8 +27,8 @@ const (
 	ESC_BYTE   = 0x7D
 	ESC_XOR    = 0x20
 
-	MAX_PACKET_SIZE  = 64
-	MAX_PAYLOAD_SIZE = 58
+	MAX_PACKET_SIZE  = 128
+	MAX_PAYLOAD_SIZE = 122
 
 	// CRC-16-CCITT
 	CRC_POLYNOMIAL = 0x1021
@@ -351,13 +351,22 @@ func formatPayload(msgType uint8, payload []byte) string {
 
 			offset := 7
 
-			// Parse motor data (12 bytes each: rpm, target, pwm_duty)
-			for i := 0; i < int(motorCount) && offset+11 <= len(payload); i++ {
+			// Parse motor data (16 bytes each: rpm, target, pwm_duty, pwm_period)
+			for i := 0; i < int(motorCount) && offset+15 <= len(payload); i++ {
 				rpm := int32(uint32(payload[offset]) | uint32(payload[offset+1])<<8 | uint32(payload[offset+2])<<16 | uint32(payload[offset+3])<<24)
 				targetRPM := int32(uint32(payload[offset+4]) | uint32(payload[offset+5])<<8 | uint32(payload[offset+6])<<16 | uint32(payload[offset+7])<<24)
 				pwmDuty := int32(uint32(payload[offset+8]) | uint32(payload[offset+9])<<8 | uint32(payload[offset+10])<<16 | uint32(payload[offset+11])<<24)
-				result += fmt.Sprintf("    Motor %d: RPM=%d (target=%d), PWM=%d ns\n", i, rpm, targetRPM, pwmDuty)
-				offset += 12
+				pwmPeriod := int32(uint32(payload[offset+12]) | uint32(payload[offset+13])<<8 | uint32(payload[offset+14])<<16 | uint32(payload[offset+15])<<24)
+
+				// Calculate PWM percentage
+				var pwmPercent float64
+				if pwmPeriod > 0 {
+					pwmPercent = (float64(pwmDuty) / float64(pwmPeriod)) * 100.0
+				}
+
+				result += fmt.Sprintf("    Motor %d: RPM=%d (target=%d), Power=%.1f%% (%d/%d ns)\n",
+					i, rpm, targetRPM, pwmPercent, pwmDuty, pwmPeriod)
+				offset += 16
 			}
 
 			// Parse temperature data (8 bytes each: f64)
