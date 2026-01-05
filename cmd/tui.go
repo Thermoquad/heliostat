@@ -212,6 +212,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				for _, err := range msg.validationErrors {
 					m.addLogEntry(fmt.Sprintf("%s: %s", msgType, err.Message), true)
 				}
+			} else if msg.packet.Type() == helios_protocol.MSG_PING_RESPONSE {
+				// Ping responses update telemetry silently (no log entry)
+				// The uptime will appear in the "Latest Telemetry" box
 			} else if m.showAll {
 				// Valid packet (only if --show-all)
 				msgType := helios_protocol.FormatMessageType(msg.packet.Type())
@@ -285,6 +288,14 @@ func (m *model) parseTelemetry(packet *helios_protocol.Packet) {
 			offset += 8
 		}
 
+		// Preserve uptime if we already have it
+		uptime := uint64(0)
+		hasUptime := false
+		if m.lastTelemetry != nil && m.lastTelemetry.hasUptime {
+			uptime = m.lastTelemetry.uptime
+			hasUptime = true
+		}
+
 		m.lastTelemetry = &telemetryData{
 			timestamp:    time.Now(),
 			state:        state,
@@ -295,7 +306,8 @@ func (m *model) parseTelemetry(packet *helios_protocol.Packet) {
 			motorRPM:     motorRPM,
 			motorTarget:  motorTarget,
 			temperatures: temperatures,
-			hasUptime:    false,
+			uptime:       uptime,
+			hasUptime:    hasUptime,
 		}
 
 	case helios_protocol.MSG_STATE_DATA:
@@ -326,6 +338,29 @@ func (m *model) parseTelemetry(packet *helios_protocol.Packet) {
 				state:     state,
 				stateName: stateName,
 				errorCode: errorCode,
+				uptime:    uptime,
+				hasUptime: true,
+			}
+		}
+
+	case helios_protocol.MSG_PING_RESPONSE:
+		if len(payload) < 8 {
+			return
+		}
+
+		// Extract uptime from ping response (8 bytes, little-endian)
+		uptime := uint64(payload[0]) | uint64(payload[1])<<8 |
+			uint64(payload[2])<<16 | uint64(payload[3])<<24 |
+			uint64(payload[4])<<32 | uint64(payload[5])<<40 |
+			uint64(payload[6])<<48 | uint64(payload[7])<<56
+
+		// Update or create telemetry with uptime
+		if m.lastTelemetry != nil {
+			m.lastTelemetry.uptime = uptime
+			m.lastTelemetry.hasUptime = true
+		} else {
+			m.lastTelemetry = &telemetryData{
+				timestamp: time.Now(),
 				uptime:    uptime,
 				hasUptime: true,
 			}

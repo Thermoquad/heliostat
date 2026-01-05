@@ -25,13 +25,13 @@ const (
 
 // Message Types - Commands (Master → ICU)
 const (
-	MSG_SET_MODE           = 0x10
-	MSG_SET_PUMP_RATE      = 0x11
-	MSG_SET_TARGET_RPM     = 0x12
-	MSG_PING_REQUEST       = 0x13
-	MSG_SET_TIMEOUT_CONFIG = 0x14
-	MSG_EMERGENCY_STOP     = 0x15
-	MSG_TELEMETRY_CONFIG   = 0x16
+	MSG_STATE_COMMAND    = 0x10
+	MSG_MOTOR_COMMAND    = 0x11
+	MSG_PUMP_COMMAND     = 0x12
+	MSG_GLOW_COMMAND     = 0x13
+	MSG_TEMP_COMMAND     = 0x14
+	MSG_TELEMETRY_CONFIG = 0x16
+	MSG_PING_REQUEST     = 0x1F
 )
 
 // Message Types - Data (ICU → Master)

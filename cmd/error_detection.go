@@ -73,6 +73,26 @@ func printDecodeError(err error) {
 	fmt.Printf("  >>> DECODE FAILED <<<\n\n")
 }
 
+// printPingResponse prints a ping response with uptime
+func printPingResponse(packet *helios_protocol.Packet) {
+	timestamp := packet.Timestamp().Format("15:04:05.000")
+	payload := packet.Payload()
+
+	// Extract uptime (8 bytes, little-endian)
+	if len(payload) < 8 {
+		fmt.Printf("[%s] \033[1;32mPING_RESPONSE:\033[0m Invalid payload length (%d bytes)\n\n", timestamp, len(payload))
+		return
+	}
+
+	uptime := uint64(payload[0]) | uint64(payload[1])<<8 |
+		uint64(payload[2])<<16 | uint64(payload[3])<<24 |
+		uint64(payload[4])<<32 | uint64(payload[5])<<40 |
+		uint64(payload[6])<<48 | uint64(payload[7])<<56
+
+	uptimeStr := formatUptime(uptime)
+	fmt.Printf("[%s] \033[1;32mPING_RESPONSE:\033[0m Helios uptime: %s\n\n", timestamp, uptimeStr)
+}
+
 // printValidationErrors prints validation errors for a packet
 func printValidationErrors(packet *helios_protocol.Packet, errors []helios_protocol.ValidationError) {
 	timestamp := packet.Timestamp().Format("15:04:05.000")
@@ -283,6 +303,9 @@ func runTextMode(port serial.Port) error {
 					// Print packet or error based on mode
 					if len(validationErrors) > 0 {
 						printValidationErrors(packet, validationErrors)
+					} else if packet.Type() == helios_protocol.MSG_PING_RESPONSE {
+						// Always print ping responses (for debugging)
+						printPingResponse(packet)
 					} else if showAll {
 						// Print valid packet (only if --show-all flag is set)
 						fmt.Print(helios_protocol.FormatPacket(packet))

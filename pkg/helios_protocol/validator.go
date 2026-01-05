@@ -14,6 +14,7 @@ const (
 	ANOMALY_HIGH_RPM
 	ANOMALY_INVALID_TEMP
 	ANOMALY_INVALID_PWM
+	ANOMALY_INVALID_VALUE
 	ANOMALY_CRC_ERROR
 	ANOMALY_DECODE_ERROR
 )
@@ -42,6 +43,8 @@ func ValidatePacket(p *Packet) []ValidationError {
 		errors = append(errors, validateMotorData(p)...)
 	case MSG_TEMPERATURE_DATA:
 		errors = append(errors, validateTemperatureData(p)...)
+	case MSG_GLOW_COMMAND:
+		errors = append(errors, validateGlowCommand(p)...)
 	}
 
 	return errors
@@ -235,6 +238,34 @@ func validateTemperatureData(p *Packet) []ValidationError {
 			Type:    ANOMALY_INVALID_TEMP,
 			Message: fmt.Sprintf("Target temperature out of range (%.1f°C, valid: -50 to 1000°C)", targetTemp),
 			Details: map[string]interface{}{"value": targetTemp, "min": -50.0, "max": 1000.0},
+		})
+	}
+
+	return errors
+}
+
+// validateGlowCommand validates glow command packet
+func validateGlowCommand(p *Packet) []ValidationError {
+	errors := []ValidationError{}
+
+	if len(p.payload) != 8 {
+		return []ValidationError{{
+			Type:    ANOMALY_LENGTH_MISMATCH,
+			Message: "Glow command payload length mismatch (expected 8 bytes)",
+			Details: map[string]interface{}{"length": len(p.payload), "expected": 8},
+		}}
+	}
+
+	// Extract duration (bytes 4-7, little-endian int32)
+	duration := int32(uint32(p.payload[4]) | uint32(p.payload[5])<<8 |
+		uint32(p.payload[6])<<16 | uint32(p.payload[7])<<24)
+
+	// Validate duration (0-300000 ms)
+	if duration < 0 || duration > 300000 {
+		errors = append(errors, ValidationError{
+			Type:    ANOMALY_INVALID_VALUE,
+			Message: fmt.Sprintf("Invalid glow duration (%d ms, valid: 0-300000)", duration),
+			Details: map[string]interface{}{"duration": duration, "min": 0, "max": 300000},
 		})
 	}
 

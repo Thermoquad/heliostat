@@ -27,20 +27,20 @@ func FormatPacket(p *Packet) string {
 func FormatMessageType(msgType uint8) string {
 	switch msgType {
 	// Commands
-	case MSG_SET_MODE:
-		return "SET_MODE"
-	case MSG_SET_PUMP_RATE:
-		return "SET_PUMP_RATE"
-	case MSG_SET_TARGET_RPM:
-		return "SET_TARGET_RPM"
-	case MSG_PING_REQUEST:
-		return "PING_REQUEST"
-	case MSG_SET_TIMEOUT_CONFIG:
-		return "SET_TIMEOUT_CONFIG"
-	case MSG_EMERGENCY_STOP:
-		return "EMERGENCY_STOP"
+	case MSG_STATE_COMMAND:
+		return "STATE_COMMAND"
+	case MSG_MOTOR_COMMAND:
+		return "MOTOR_COMMAND"
+	case MSG_PUMP_COMMAND:
+		return "PUMP_COMMAND"
+	case MSG_GLOW_COMMAND:
+		return "GLOW_COMMAND"
+	case MSG_TEMP_COMMAND:
+		return "TEMP_COMMAND"
 	case MSG_TELEMETRY_CONFIG:
 		return "TELEMETRY_CONFIG"
+	case MSG_PING_REQUEST:
+		return "PING_REQUEST"
 
 	// Data
 	case MSG_STATE_DATA:
@@ -86,7 +86,7 @@ func FormatPayload(msgType uint8, payload []byte) string {
 			return fmt.Sprintf("  Uptime: %s\n", formatDuration(uptime))
 		}
 
-	case MSG_SET_MODE:
+	case MSG_STATE_COMMAND:
 		if len(payload) >= 5 {
 			mode := payload[0]
 			param := uint32(payload[1]) | uint32(payload[2])<<8 | uint32(payload[3])<<16 | uint32(payload[4])<<24
@@ -159,13 +159,20 @@ func FormatPayload(msgType uint8, payload []byte) string {
 			return result
 		}
 
-	case MSG_SET_PUMP_RATE:
+	case MSG_PUMP_COMMAND:
 		if len(payload) >= 4 {
 			rate := uint32(payload[0]) | uint32(payload[1])<<8 | uint32(payload[2])<<16 | uint32(payload[3])<<24
 			return fmt.Sprintf("  Rate: %d ms\n", rate)
 		}
 
-	case MSG_SET_TARGET_RPM:
+	case MSG_GLOW_COMMAND:
+		if len(payload) >= 8 {
+			glow := int32(uint32(payload[0]) | uint32(payload[1])<<8 | uint32(payload[2])<<16 | uint32(payload[3])<<24)
+			duration := int32(uint32(payload[4]) | uint32(payload[5])<<8 | uint32(payload[6])<<16 | uint32(payload[7])<<24)
+			return fmt.Sprintf("  Glow: %d, Duration: %d ms\n", glow, duration)
+		}
+
+	case MSG_MOTOR_COMMAND:
 		if len(payload) >= 4 {
 			rpm := uint32(payload[0]) | uint32(payload[1])<<8 | uint32(payload[2])<<16 | uint32(payload[3])<<24
 			return fmt.Sprintf("  Target RPM: %d\n", rpm)
