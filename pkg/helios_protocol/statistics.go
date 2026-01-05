@@ -46,10 +46,12 @@ func (s *Statistics) Update(packet *Packet, decodeErr error, validationErrors []
 
 	// Handle decode errors
 	if decodeErr != nil {
-		s.DecodeErrors++
-		// Check if it's a CRC error
+		// Check if it's a CRC error (special case - only count as CRC error)
 		if len(decodeErr.Error()) > 0 && decodeErr.Error()[:12] == "CRC mismatch" {
 			s.CRCErrors++
+		} else {
+			// Other decode errors (framing, overflow, etc.)
+			s.DecodeErrors++
 		}
 		return // Don't process packet further if decode failed
 	}
