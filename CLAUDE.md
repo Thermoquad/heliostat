@@ -12,6 +12,8 @@ Heliostat is a Go CLI tool for monitoring and analyzing Helios serial protocol p
 - Track statistics (packet rates, error rates, success rates)
 - Reusable protocol package for other Go tools
 
+**Protocol Specification:** `../../origin/docs/protocols/serial_protocol.md` (Fusain Protocol v2.0)
+
 ---
 
 ## Architecture
@@ -440,6 +442,8 @@ go mod tidy
 
 **Relationship:** Heliostat implements the same protocol as Fusain in Go.
 
+**Protocol Specification:** `../../origin/docs/protocols/serial_protocol.md` (Fusain Protocol v2.0)
+
 **Shared Concepts:**
 - Protocol constants (message types, framing bytes)
 - CRC-16-CCITT algorithm
@@ -467,7 +471,7 @@ go mod tidy
 
 **Relationship:** Helios is the ICU that sends telemetry. Heliostat decodes and validates that telemetry.
 
-**Protocol Version:** Heliostat supports protocol v1.3 (same as Helios)
+**Protocol Version:** Heliostat supports Fusain Protocol v2.0 (same as Helios)
 
 ---
 
