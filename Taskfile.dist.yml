@@ -1,0 +1,84 @@
+# SPDX-License-Identifier: Apache-2.0
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+version: "3"
+
+includes:
+  fusain:
+    taskfile: ./pkg/fusain/Taskfile.dist.yml
+    dir: ./pkg/fusain
+
+tasks:
+  build:
+    desc: Build the heliostat binary
+    cmd: go build -o heliostat .
+
+  clean:
+    desc: Clean build artifacts
+    cmd: rm -f heliostat
+
+  format:
+    desc: Format Go source files (all modules)
+    cmds:
+      - gofmt -w .
+      - task: fusain:format
+
+  format-check:
+    desc: Check if Go source files are formatted correctly (all modules)
+    cmds:
+      - |
+        RESULT=$(gofmt -l .)
+        if [ -n "$RESULT" ]; then
+          echo "Formatting issues found in:"
+          echo "$RESULT"
+          echo ""
+          echo "Run 'task format' to fix formatting issues."
+          exit 1
+        else
+          echo "All files are correctly formatted."
+        fi
+      - task: fusain:format-check
+
+  lint:
+    desc: Run golangci-lint
+    cmd: golangci-lint run ./...
+
+  vet:
+    desc: Run go vet (all modules)
+    cmds:
+      - go vet ./...
+      - task: fusain:vet
+
+  mod-tidy:
+    desc: Run go mod tidy (all modules)
+    cmds:
+      - go mod tidy
+      - task: fusain:mod-tidy
+
+  ci:
+    desc: Run CI checks - format check, vet, and test suite with 100,000 fuzz rounds
+    cmds:
+      - echo "Running CI checks..."
+      - echo ""
+      - task: format-check
+      - echo ""
+      - task: vet
+      - echo ""
+      - echo "Running test suite with 100,000 fuzz rounds..."
+      - echo "This may take a few seconds. Please be patient."
+      - task: fusain:test
+        vars:
+          CLI_ARGS: "100000"
+
+  deps:
+    desc: Download and verify dependencies
+    cmds:
+      - go mod download
+      - go mod verify
+
+  all:
+    desc: Run format, lint, test, and build
+    cmds:
+      - task: format
+      - task: vet
+      - task: fusain:test
+      - task: build

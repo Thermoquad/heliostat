@@ -1,0 +1,81 @@
+# SPDX-License-Identifier: Apache-2.0
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+version: "3"
+
+vars:
+  COVERAGE_DIR: coverage
+  COVERAGE_FILE: '{{.COVERAGE_DIR}}/coverage.out'
+
+tasks:
+  test:
+    desc: Run all tests (functional and fuzz with optional round count, e.g., 'task test -- 5000')
+    vars:
+      ROUNDS: '{{default "1000" .CLI_ARGS}}'
+    cmd: FUZZ_ROUNDS={{.ROUNDS}} go test -v ./...
+
+  test-functional:
+    desc: Run only functional tests (no fuzzing)
+    cmd: go test -v -run '^Test[^Fuzz]' ./...
+
+  test-fuzz:
+    desc: Run only fuzz tests with optional round count (e.g., 'task test-fuzz -- 10000')
+    vars:
+      ROUNDS: '{{default "1000" .CLI_ARGS}}'
+    cmd: FUZZ_ROUNDS={{.ROUNDS}} go test -v -run 'Fuzz' ./...
+
+  coverage:
+    desc: Run tests with coverage and display summary
+    cmds:
+      - mkdir -p {{.COVERAGE_DIR}}
+      - go test -coverprofile={{.COVERAGE_FILE}} ./...
+      - go tool cover -func={{.COVERAGE_FILE}}
+
+  coverage-html:
+    desc: Generate HTML coverage report and open in browser
+    deps: [coverage]
+    cmd: go tool cover -html={{.COVERAGE_FILE}} -o {{.COVERAGE_DIR}}/coverage.html
+
+  coverage-clean:
+    desc: Remove coverage artifacts
+    cmd: rm -rf {{.COVERAGE_DIR}}
+
+  format:
+    desc: Format Go source files
+    cmd: gofmt -w .
+
+  format-check:
+    desc: Check if Go source files are formatted correctly
+    cmds:
+      - |
+        RESULT=$(gofmt -l .)
+        if [ -n "$RESULT" ]; then
+          echo "Formatting issues found in:"
+          echo "$RESULT"
+          echo ""
+          echo "Run 'task format' to fix formatting issues."
+          exit 1
+        else
+          echo "All files are correctly formatted."
+        fi
+
+  vet:
+    desc: Run go vet
+    cmd: go vet ./...
+
+  mod-tidy:
+    desc: Run go mod tidy
+    cmd: go mod tidy
+
+  ci:
+    desc: Run CI checks - format check, vet, and test suite with 100,000 fuzz rounds
+    cmds:
+      - echo "Running fusain CI checks..."
+      - echo ""
+      - task: format-check
+      - echo ""
+      - task: vet
+      - echo ""
+      - echo "Running test suite with 100,000 fuzz rounds..."
+      - task: test
+        vars:
+          CLI_ARGS: "100000"

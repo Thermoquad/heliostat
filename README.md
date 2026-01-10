@@ -1,14 +1,16 @@
-# Heliostat - Helios Serial Protocol Analyzer
+# Heliostat - Fusain Protocol Analyzer
 
-A CLI tool for monitoring and analyzing Helios serial protocol packets in real-time.
+A CLI tool for monitoring and analyzing Fusain serial protocol packets in real-time.
+
+**Protocol Version:** Fusain v2.0
 
 ## Features
 
-- **Raw Log Mode**: Display decoded packets in human-readable format (original heliostat behavior)
+- **Raw Log Mode**: Display decoded packets in human-readable format
 - **Error Detection Mode**: Track malformed packets, CRC errors, and anomalous values with live statistics
-- **Reusable Protocol Package**: `pkg/helios_protocol` can be imported by other Go tools
+- **Reference Go Implementation**: `pkg/fusain` provides the canonical Go implementation of the Fusain protocol
 - **Real-time Validation**: Detect suspicious packet data as it arrives
-- **Configurable Statistics**: Periodic statistics summaries at configurable intervals
+- **TUI Mode**: Interactive terminal UI with live statistics (default)
 
 ## Installation
 
@@ -23,7 +25,7 @@ This produces the `heliostat` binary.
 
 ### Raw Packet Log
 
-Display all packets in human-readable format (same as original heliostat):
+Display all packets in human-readable format:
 
 ```bash
 heliostat raw_log --port /dev/ttyUSB0
@@ -37,7 +39,7 @@ heliostat raw_log --port /dev/ttyUSB0 --baud 115200
 
 ### Error Detection Mode
 
-Track errors, malformed packets, and anomalous values with a live terminal UI (shows only errors by default):
+Track errors, malformed packets, and anomalous values with a live terminal UI:
 
 ```bash
 heliostat error_detection --port /dev/ttyUSB0
@@ -55,10 +57,10 @@ Use text mode instead of TUI:
 heliostat error_detection --port /dev/ttyUSB0 --tui=false
 ```
 
-Custom statistics interval (default 10 seconds):
+Custom statistics interval (default 10 seconds, text mode only):
 
 ```bash
-heliostat error_detection --port /dev/ttyUSB0 --stats-interval 5
+heliostat error_detection --port /dev/ttyUSB0 --tui=false --stats-interval 5
 ```
 
 ### Help
@@ -74,8 +76,8 @@ heliostat error_detection --help
 The `error_detection` command validates packets and detects:
 
 ### Malformed Packets
-- **Invalid Counts**: `motor_count` or `temp_count` exceeding 10 (e.g., the motor_count=136 bug)
-- **Length Mismatches**: Payload length doesn't match expected size based on declared counts
+- **Invalid Counts**: `motor_count` or `temp_count` exceeding limits
+- **Length Mismatches**: Payload length doesn't match expected size
 
 ### Decode Errors
 - **CRC Failures**: CRC-16-CCITT checksum validation failures
@@ -83,7 +85,7 @@ The `error_detection` command validates packets and detects:
 - **Buffer Overflows**: Packets exceeding maximum size limits
 
 ### Anomalous Values
-- **High RPM**: Motor RPM or target RPM exceeding 6000 (unrealistic for Helios motors)
+- **High RPM**: Motor RPM or target RPM exceeding 6000
 - **Invalid Temperatures**: Values outside -50°C to 1000°C range
 - **Invalid PWM**: PWM duty cycle exceeding PWM period
 
@@ -94,100 +96,103 @@ The `error_detection` command validates packets and detects:
 - Packet rate (packets/second)
 - Error rate (errors/second)
 
-## Example Output
-
-### Error Detection Mode
-
-```
-Heliostat - Error Detection Mode
-Port: /dev/ttyUSB0 @ 115200 baud
-Statistics interval: 10 seconds
-Press Ctrl+C to exit
-
-=== Statistics (10 seconds) ===
-Total Packets:       1,234
-Valid Packets:       1,198 (97.1%)
-CRC Errors:             12 (1.0%)
-Decode Errors:           2 (0.2%)
-Malformed Pkts:         22 (1.8%)
-  Invalid Counts:       20
-  Length Mismatch:       2
-Anomalous Values:        5 (0.4%)
-  High RPM (>6000):      3
-  Invalid Temp:          2
-Packet Rate:        123.4 pkts/sec
-Error Rate:           3.6 errors/sec
-================================
-
-[15:04:05.123] VALIDATION ERROR: TELEMETRY_BUNDLE (0x25)
-  CRC: OK
-  Issue 1: Invalid motor_count=136 (max 10)
-    motor_count=136 (max 10)
-  Issue 2: Payload length mismatch: received=23, expected=15 (motors=136, temps=1)
-    Length: received=23, expected=15
-  State: IDLE (0x00), Error: 0x00
-  >>> PACKET REJECTED <<<
-```
-
 ## Protocol Package
 
-The `pkg/helios_protocol` package provides reusable components for Helios protocol handling:
+The `pkg/fusain` package provides the reference Go implementation of the Fusain protocol:
 
 ```go
-import "github.com/Thermoquad/heliostat/pkg/helios_protocol"
+import "github.com/Thermoquad/heliostat/pkg/fusain"
 
 // Create decoder
-decoder := helios_protocol.NewDecoder()
+decoder := fusain.NewDecoder()
 
 // Decode bytes
 packet, err := decoder.DecodeByte(byteValue)
 
 // Validate packet
-errors := helios_protocol.ValidatePacket(packet)
+errors := fusain.ValidatePacket(packet)
 
 // Format for display
-output := helios_protocol.FormatPacket(packet)
+output := fusain.FormatPacket(packet)
 
 // Track statistics
-stats := helios_protocol.NewStatistics()
+stats := fusain.NewStatistics()
 stats.Update(packet, decodeErr, validationErrors)
 fmt.Println(stats.String())
 ```
 
 ### Package Structure
 
-- `constants.go` - Protocol constants (message types, framing bytes, limits)
-- `packet.go` - Packet structure and methods
-- `decoder.go` - State machine decoder
-- `crc.go` - CRC-16-CCITT calculation
-- `formatter.go` - Human-readable packet formatting
-- `validator.go` - Packet validation and anomaly detection
-- `statistics.go` - Statistics tracking and reporting
+```
+pkg/fusain/
+├── constants.go    # Protocol constants (message types, framing bytes, limits)
+├── packet.go       # Packet structure and methods
+├── decoder.go      # State machine decoder with byte unstuffing
+├── crc.go          # CRC-16-CCITT calculation
+├── formatter.go    # Human-readable packet formatting
+├── validator.go    # Packet validation and anomaly detection
+├── statistics.go   # Statistics tracking and reporting
+├── fusain_test.go  # Comprehensive unit tests
+└── fuzz_test.go    # Fuzz testing
+```
+
+The package is a **standalone Go module** with no external dependencies (stdlib only),
+allowing it to be imported by other Go tools.
 
 ## Development
 
-Build:
+### Build
+
 ```bash
 go build
 ```
 
-Test:
+### Test
+
 ```bash
+# Run all tests
 go test ./...
+
+# Run fusain package tests with coverage
+task fusain:test
+
+# Run with custom fuzz rounds
+task fusain:test -- 10000
+
+# CI mode (format check, vet, 100k fuzz rounds)
+task fusain:ci
 ```
 
-Format:
+### Format
+
 ```bash
 go fmt ./...
 ```
 
-Update dependencies:
+### Update Dependencies
+
 ```bash
 go mod tidy
 ```
 
+## Protocol Specification
+
+The Fusain protocol specification is maintained in the Sphinx documentation:
+
+- **Location:** `origin/documentation/source/specifications/fusain/`
+- **Contents:** Packet format, message types, payloads, communication patterns
+
+## Related Projects
+
+- **Fusain Library (C):** `modules/lib/fusain/` - Embedded C implementation for Zephyr RTOS
+- **Helios Firmware:** `apps/helios/` - Burner ICU that sends telemetry
+- **Slate Firmware:** `apps/slate/` - Controller that receives telemetry
+
 ## License
 
-Apache-2.0
+**Heliostat** is licensed under the GNU General Public License v2.0 or later (GPL-2.0-or-later).
+
+**Note:** The `pkg/fusain` protocol library is licensed separately under Apache-2.0 to allow
+broader use in both open source and proprietary applications.
 
 Copyright (c) 2025 Kaz Walker, Thermoquad

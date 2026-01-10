@@ -2,7 +2,12 @@ module github.com/Thermoquad/heliostat
 
 go 1.25.5
 
-require go.bug.st/serial v1.6.4
+require (
+	github.com/Thermoquad/heliostat/pkg/fusain v0.0.0
+	go.bug.st/serial v1.6.4
+)
+
+replace github.com/Thermoquad/heliostat/pkg/fusain => ./pkg/fusain
 
 require (
 	github.com/aymanbagabas/go-osc52/v2 v2.0.1 // indirect

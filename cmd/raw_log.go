@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-2.0-or-later
 // Copyright (c) 2025 Kaz Walker, Thermoquad
 
 package cmd
@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/Thermoquad/heliostat/pkg/helios_protocol"
+	"github.com/Thermoquad/heliostat/pkg/fusain"
 	"github.com/spf13/cobra"
 	"go.bug.st/serial"
 )
@@ -45,7 +45,7 @@ func runRawLog(cmd *cobra.Command, args []string) error {
 	fmt.Printf("Port: %s @ %d baud\n", portName, baudRate)
 	fmt.Printf("Press Ctrl+C to exit\n\n")
 
-	decoder := helios_protocol.NewDecoder()
+	decoder := fusain.NewDecoder()
 	buf := make([]byte, 128)
 
 	for {
@@ -62,7 +62,7 @@ func runRawLog(cmd *cobra.Command, args []string) error {
 				continue
 			}
 			if packet != nil {
-				fmt.Print(helios_protocol.FormatPacket(packet))
+				fmt.Print(fusain.FormatPacket(packet))
 			}
 		}
 	}

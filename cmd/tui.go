@@ -1,17 +1,23 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-2.0-or-later
 // Copyright (c) 2025 Kaz Walker, Thermoquad
 
 package cmd
 
 import (
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
-	"github.com/Thermoquad/heliostat/pkg/helios_protocol"
+	"github.com/Thermoquad/heliostat/pkg/fusain"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
+
+// float64frombits converts uint64 bits to float64
+func float64frombits(b uint64) float64 {
+	return math.Float64frombits(b)
+}
 
 // Error log entry
 type errorLogEntry struct {
@@ -37,27 +43,27 @@ type telemetryData struct {
 
 // TUI model
 type model struct {
-	portName       string
-	baudRate       int
-	statsInterval  int
-	showAll        bool
-	stats          *helios_protocol.Statistics
-	errorLog       []errorLogEntry
-	maxLogEntries  int
-	synchronized   bool
-	invalidBytes   int
-	width          int
-	height         int
-	quitting       bool
-	lastTelemetry  *telemetryData
+	portName      string
+	baudRate      int
+	statsInterval int
+	showAll       bool
+	stats         *fusain.Statistics
+	errorLog      []errorLogEntry
+	maxLogEntries int
+	synchronized  bool
+	invalidBytes  int
+	width         int
+	height        int
+	quitting      bool
+	lastTelemetry *telemetryData
 }
 
 // Messages
 type tickMsg time.Time
 type serialDataMsg struct {
-	packet           *helios_protocol.Packet
+	packet           *fusain.Packet
 	decodeErr        error
-	validationErrors []helios_protocol.ValidationError
+	validationErrors []fusain.ValidationError
 }
 type syncMsg struct {
 	invalidBytes int
@@ -144,7 +150,7 @@ func initialModel(portName string, baudRate, statsInterval int, showAll bool) mo
 		baudRate:      baudRate,
 		statsInterval: statsInterval,
 		showAll:       showAll,
-		stats:         helios_protocol.NewStatistics(),
+		stats:         fusain.NewStatistics(),
 		errorLog:      make([]errorLogEntry, 0),
 		maxLogEntries: 100,
 		synchronized:  false,
@@ -208,16 +214,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 			if len(msg.validationErrors) > 0 {
 				// Validation errors
-				msgType := helios_protocol.FormatMessageType(msg.packet.Type())
+				msgType := fusain.FormatMessageType(msg.packet.Type())
 				for _, err := range msg.validationErrors {
 					m.addLogEntry(fmt.Sprintf("%s: %s", msgType, err.Message), true)
 				}
-			} else if msg.packet.Type() == helios_protocol.MSG_PING_RESPONSE {
+			} else if msg.packet.Type() == fusain.MSG_PING_RESPONSE {
 				// Ping responses update telemetry silently (no log entry)
 				// The uptime will appear in the "Latest Telemetry" box
 			} else if m.showAll {
 				// Valid packet (only if --show-all)
-				msgType := helios_protocol.FormatMessageType(msg.packet.Type())
+				msgType := fusain.FormatMessageType(msg.packet.Type())
 				m.addLogEntry(fmt.Sprintf("%s (valid)", msgType), false)
 			}
 		}
@@ -241,54 +247,28 @@ func (m *model) addLogEntry(message string, isError bool) {
 }
 
 // parseTelemetry extracts telemetry data from packets
-func (m *model) parseTelemetry(packet *helios_protocol.Packet) {
+func (m *model) parseTelemetry(packet *fusain.Packet) {
 	payload := packet.Payload()
 	stateNames := []string{"INITIALIZING", "IDLE", "BLOWING", "PREHEAT", "PREHEAT_STAGE_2", "HEATING", "COOLING", "ERROR", "E_STOP"}
 
 	switch packet.Type() {
-	case helios_protocol.MSG_TELEMETRY_BUNDLE:
-		if len(payload) < 7 {
+	case fusain.MSG_STATE_DATA:
+		if len(payload) < 16 {
 			return
 		}
 
-		state := uint32(payload[0]) | uint32(payload[1])<<8 |
-			uint32(payload[2])<<16 | uint32(payload[3])<<24
-		errorCode := payload[4]
-		motorCount := payload[5]
-		tempCount := payload[6]
+		// STATE_DATA payload per spec: error(4) + code(4) + state(4) + timestamp(4)
+		// code is the error code (bytes 4-7)
+		errorCode := uint8(payload[4]) // Just first byte for error code display
+		state := uint32(payload[8]) | uint32(payload[9])<<8 |
+			uint32(payload[10])<<16 | uint32(payload[11])<<24
 
 		stateName := "UNKNOWN"
 		if int(state) < len(stateNames) {
 			stateName = stateNames[state]
 		}
 
-		// Extract motor data
-		motorRPM := []int32{}
-		motorTarget := []int32{}
-		offset := 7
-		for i := 0; i < int(motorCount) && offset+15 < len(payload); i++ {
-			rpm := int32(uint32(payload[offset]) | uint32(payload[offset+1])<<8 |
-				uint32(payload[offset+2])<<16 | uint32(payload[offset+3])<<24)
-			target := int32(uint32(payload[offset+4]) | uint32(payload[offset+5])<<8 |
-				uint32(payload[offset+6])<<16 | uint32(payload[offset+7])<<24)
-			motorRPM = append(motorRPM, rpm)
-			motorTarget = append(motorTarget, target)
-			offset += 16
-		}
-
-		// Extract temperature data
-		temperatures := []float64{}
-		for i := 0; i < int(tempCount) && offset+7 < len(payload); i++ {
-			tempBits := uint64(payload[offset]) | uint64(payload[offset+1])<<8 |
-				uint64(payload[offset+2])<<16 | uint64(payload[offset+3])<<24 |
-				uint64(payload[offset+4])<<32 | uint64(payload[offset+5])<<40 |
-				uint64(payload[offset+6])<<48 | uint64(payload[offset+7])<<56
-			temp := helios_protocol.Float64frombits(tempBits)
-			temperatures = append(temperatures, temp)
-			offset += 8
-		}
-
-		// Preserve uptime if we already have it
+		// Preserve uptime if we already have it from a PING_RESPONSE
 		uptime := uint64(0)
 		hasUptime := false
 		if m.lastTelemetry != nil && m.lastTelemetry.hasUptime {
@@ -297,74 +277,91 @@ func (m *model) parseTelemetry(packet *helios_protocol.Packet) {
 		}
 
 		m.lastTelemetry = &telemetryData{
-			timestamp:    time.Now(),
-			state:        state,
-			stateName:    stateName,
-			errorCode:    errorCode,
-			motorCount:   motorCount,
-			tempCount:    tempCount,
-			motorRPM:     motorRPM,
-			motorTarget:  motorTarget,
-			temperatures: temperatures,
-			uptime:       uptime,
-			hasUptime:    hasUptime,
+			timestamp: time.Now(),
+			state:     state,
+			stateName: stateName,
+			errorCode: errorCode,
+			uptime:    uptime,
+			hasUptime: hasUptime,
 		}
 
-	case helios_protocol.MSG_STATE_DATA:
-		if len(payload) < 16 {
+	case fusain.MSG_PING_RESPONSE:
+		if len(payload) < 4 {
 			return
 		}
 
-		state := uint32(payload[0]) | uint32(payload[1])<<8 |
-			uint32(payload[2])<<16 | uint32(payload[3])<<24
-		errorCode := payload[4]
-		uptime := uint64(payload[8]) | uint64(payload[9])<<8 |
+		// Extract uptime from ping response (4 bytes, little-endian per spec)
+		uptime := uint64(payload[0]) | uint64(payload[1])<<8 |
+			uint64(payload[2])<<16 | uint64(payload[3])<<24
+
+		// Update or create telemetry with uptime
+		if m.lastTelemetry != nil {
+			m.lastTelemetry.uptime = uptime
+			m.lastTelemetry.hasUptime = true
+		} else {
+			m.lastTelemetry = &telemetryData{
+				timestamp: time.Now(),
+				uptime:    uptime,
+				hasUptime: true,
+			}
+		}
+
+	case fusain.MSG_MOTOR_DATA:
+		if len(payload) < 32 {
+			return
+		}
+
+		// MOTOR_DATA: motor(4) + timestamp(4) + rpm(4) + target(4) + max_rpm(4) + min_rpm(4) + pwm(4) + pwm_max(4)
+		motorIdx := int32(payload[0]) | int32(payload[1])<<8 |
+			int32(payload[2])<<16 | int32(payload[3])<<24
+		rpm := int32(payload[8]) | int32(payload[9])<<8 |
+			int32(payload[10])<<16 | int32(payload[11])<<24
+		target := int32(payload[12]) | int32(payload[13])<<8 |
+			int32(payload[14])<<16 | int32(payload[15])<<24
+
+		// Ensure we have storage for this motor
+		if m.lastTelemetry == nil {
+			m.lastTelemetry = &telemetryData{timestamp: time.Now()}
+		}
+
+		// Expand slices if needed
+		for len(m.lastTelemetry.motorRPM) <= int(motorIdx) {
+			m.lastTelemetry.motorRPM = append(m.lastTelemetry.motorRPM, 0)
+		}
+		for len(m.lastTelemetry.motorTarget) <= int(motorIdx) {
+			m.lastTelemetry.motorTarget = append(m.lastTelemetry.motorTarget, 0)
+		}
+
+		m.lastTelemetry.motorRPM[motorIdx] = rpm
+		m.lastTelemetry.motorTarget[motorIdx] = target
+
+	case fusain.MSG_TEMP_DATA:
+		if len(payload) < 32 {
+			return
+		}
+
+		// TEMP_DATA: temperature(4) + timestamp(4) + reading(8) + rpm_control(4) + watched_motor(4) + target_temp(8)
+		tempIdx := int32(payload[0]) | int32(payload[1])<<8 |
+			int32(payload[2])<<16 | int32(payload[3])<<24
+
+		// Extract float64 reading (bytes 8-15, little-endian)
+		readingBits := uint64(payload[8]) | uint64(payload[9])<<8 |
 			uint64(payload[10])<<16 | uint64(payload[11])<<24 |
 			uint64(payload[12])<<32 | uint64(payload[13])<<40 |
 			uint64(payload[14])<<48 | uint64(payload[15])<<56
+		reading := float64frombits(readingBits)
 
-		stateName := "UNKNOWN"
-		if int(state) < len(stateNames) {
-			stateName = stateNames[state]
+		// Ensure we have storage for this temperature
+		if m.lastTelemetry == nil {
+			m.lastTelemetry = &telemetryData{timestamp: time.Now()}
 		}
 
-		// Update or create telemetry with uptime
-		if m.lastTelemetry != nil {
-			m.lastTelemetry.uptime = uptime
-			m.lastTelemetry.hasUptime = true
-		} else {
-			m.lastTelemetry = &telemetryData{
-				timestamp: time.Now(),
-				state:     state,
-				stateName: stateName,
-				errorCode: errorCode,
-				uptime:    uptime,
-				hasUptime: true,
-			}
+		// Expand slice if needed
+		for len(m.lastTelemetry.temperatures) <= int(tempIdx) {
+			m.lastTelemetry.temperatures = append(m.lastTelemetry.temperatures, 0)
 		}
 
-	case helios_protocol.MSG_PING_RESPONSE:
-		if len(payload) < 8 {
-			return
-		}
-
-		// Extract uptime from ping response (8 bytes, little-endian)
-		uptime := uint64(payload[0]) | uint64(payload[1])<<8 |
-			uint64(payload[2])<<16 | uint64(payload[3])<<24 |
-			uint64(payload[4])<<32 | uint64(payload[5])<<40 |
-			uint64(payload[6])<<48 | uint64(payload[7])<<56
-
-		// Update or create telemetry with uptime
-		if m.lastTelemetry != nil {
-			m.lastTelemetry.uptime = uptime
-			m.lastTelemetry.hasUptime = true
-		} else {
-			m.lastTelemetry = &telemetryData{
-				timestamp: time.Now(),
-				uptime:    uptime,
-				hasUptime: true,
-			}
-		}
+		m.lastTelemetry.temperatures[tempIdx] = reading
 	}
 }
 

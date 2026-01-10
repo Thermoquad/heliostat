@@ -2,17 +2,17 @@
 
 ## Project Overview
 
-Heliostat is a Go CLI tool for monitoring and analyzing Helios serial protocol packets in real-time. It provides both raw packet logging and advanced error detection capabilities.
+Heliostat is a Go CLI tool for monitoring and analyzing Fusain protocol packets in real-time. It provides both raw packet logging and advanced error detection capabilities.
 
 **Purpose:** Diagnose communication issues, validate protocol implementation, and detect anomalous telemetry data from Helios burner ICU.
 
 **Key Features:**
-- Decode and display Helios protocol packets
+- Decode and display Fusain protocol packets
 - Validate packet structure and detect anomalies
 - Track statistics (packet rates, error rates, success rates)
-- Reusable protocol package for other Go tools
+- **Reference Go implementation** of Fusain protocol (`pkg/fusain/`)
 
-**Protocol Specification:** `../../origin/docs/protocols/serial_protocol.md` (Fusain Protocol v2.0)
+**Protocol Specification:** `origin/documentation/source/specifications/fusain/` (Sphinx docs)
 
 ---
 
@@ -28,9 +28,10 @@ Heliostat is a Go CLI tool for monitoring and analyzing Helios serial protocol p
 
 ```
 heliostat/
-├── go.mod                           # Go module definition
+├── go.mod                           # Go module definition (references pkg/fusain)
 ├── go.sum                           # Dependency checksums
 ├── main.go                          # Cobra CLI entrypoint
+├── Taskfile.dist.yml                # Task runner (includes fusain tasks)
 ├── README.md                        # User documentation
 ├── CLAUDE.md                        # This file
 ├── cmd/                             # Cobra command definitions
@@ -39,44 +40,52 @@ heliostat/
 │   ├── error_detection.go           # Error detection command
 │   └── tui.go                       # Bubbletea TUI model
 └── pkg/
-    └── helios_protocol/             # Reusable protocol package
+    └── fusain/                      # Reference Go implementation (separate module)
+        ├── go.mod                   # Standalone module for external imports
+        ├── Taskfile.dist.yml        # Fusain-specific tasks (test, coverage, ci)
         ├── constants.go             # Protocol constants
-        ├── packet.go                # Packet structure
+        ├── packet.go                # Packet structure with 8-byte addressing
         ├── decoder.go               # State machine decoder
         ├── crc.go                   # CRC-16-CCITT
-        ├── formatter.go             # Packet formatting
+        ├── formatter.go             # Packet formatting (all message types)
         ├── validator.go             # Validation and anomaly detection
-        └── statistics.go            # Statistics tracking
+        ├── statistics.go            # Statistics tracking
+        └── fusain_test.go           # Comprehensive tests (100% coverage)
 ```
+
+> **Note:** The `pkg/fusain/` package is a **separate Go module** that can be imported
+> independently by other Go tools. It has no external dependencies (stdlib only).
+>
+> **Import:** `import "github.com/Thermoquad/heliostat/pkg/fusain"`
 
 ---
 
 ## Code Structure
 
-### Package: `helios_protocol`
+### Package: `fusain`
 
-Reusable Go package for Helios protocol handling. Can be imported by other tools.
-
-**Import:**
-```go
-import "github.com/Thermoquad/heliostat/pkg/helios_protocol"
-```
+Reference Go implementation of the Fusain protocol. Separate module with no external dependencies.
 
 #### constants.go
 
 Protocol-level constants:
 - Framing bytes: `START_BYTE (0x7E)`, `END_BYTE (0x7F)`, `ESC_BYTE (0x7D)`, `ESC_XOR (0x20)`
-- Size limits: `MAX_PACKET_SIZE (128)`, `MAX_PAYLOAD_SIZE (122)`
+- Size limits: `MAX_PACKET_SIZE (128)`, `MAX_PAYLOAD_SIZE (114)`, `ADDRESS_SIZE (8)`
 - CRC parameters: `CRC_POLYNOMIAL (0x1021)`, `CRC_INITIAL (0xFFFF)`
-- Message types: Commands (0x10-0x16), Data (0x20-0x26), Errors (0xE0-0xE3)
-- Decoder states: `STATE_IDLE`, `STATE_LENGTH`, `STATE_TYPE`, `STATE_PAYLOAD`, `STATE_CRC1`, `STATE_CRC2`
+- Special addresses: `ADDRESS_BROADCAST (0x0)`, `ADDRESS_STATELESS (0xFFFFFFFFFFFFFFFF)`
+- Message types:
+  - Configuration Commands (0x10-0x1F): MOTOR_CONFIG, PUMP_CONFIG, TEMP_CONFIG, etc.
+  - Control Commands (0x20-0x2F): STATE_COMMAND, MOTOR_COMMAND, PING_REQUEST, etc.
+  - Telemetry Data (0x30-0x3F): STATE_DATA, MOTOR_DATA, TEMP_DATA, PING_RESPONSE, etc.
+  - Errors (0xE0-0xEF): ERROR_INVALID_CMD, ERROR_STATE_REJECT
+- Decoder states: `STATE_IDLE`, `STATE_LENGTH`, `STATE_ADDRESS`, `STATE_TYPE`, `STATE_PAYLOAD`, `STATE_CRC1`, `STATE_CRC2`
 
 #### packet.go
 
 **Type: `Packet`**
-- Fields: `length`, `msgType`, `payload`, `crc`, `timestamp`
-- Methods: `Length()`, `Type()`, `Payload()`, `CRC()`, `Timestamp()`
-- Constructor: `NewPacket(length, msgType, payload, crc) *Packet`
+- Fields: `length`, `address`, `msgType`, `payload`, `crc`, `timestamp`
+- Methods: `Length()`, `Address()`, `Type()`, `Payload()`, `CRC()`, `Timestamp()`, `IsBroadcast()`, `IsStateless()`
+- Constructor: `NewPacket(length, address, msgType, payload, crc) *Packet`
 
 #### decoder.go
 
@@ -94,11 +103,12 @@ Protocol-level constants:
 **State Machine:**
 1. `STATE_IDLE` - Waiting for `START_BYTE`
 2. `STATE_LENGTH` - Read payload length
-3. `STATE_TYPE` - Read message type
-4. `STATE_PAYLOAD` - Read payload bytes
-5. `STATE_CRC1` - Read CRC high byte
-6. `STATE_CRC2` - Read CRC low byte
-7. Return to idle on `END_BYTE` after validating CRC
+3. `STATE_ADDRESS` - Read 8-byte address (little-endian)
+4. `STATE_TYPE` - Read message type
+5. `STATE_PAYLOAD` - Read payload bytes
+6. `STATE_CRC1` - Read CRC high byte
+7. `STATE_CRC2` - Read CRC low byte
+8. Return to idle on `END_BYTE` after validating CRC
 
 #### crc.go
 
@@ -139,23 +149,7 @@ Protocol-level constants:
 
 **Validation Rules:**
 
-TELEMETRY_BUNDLE:
-- `motor_count <= 10` (Slate firmware limit)
-- `temp_count <= 10`
-- Payload length matches: `7 + (motor_count * 16) + (temp_count * 8)`
-- Motor RPM <= 6000
-- Target RPM <= 6000
-- PWM duty <= PWM period
-- Temperature: -50°C to 1000°C
-
-MOTOR_DATA:
-- RPM <= 6000
-- Target RPM <= 6000
-- PWM <= pwmMax
-
-TEMPERATURE_DATA:
-- Current temp: -50°C to 1000°C
-- Target temp: -50°C to 1000°C
+See `pkg/fusain/validator.go` for current validation rules. Validates message structure, count limits, and value ranges for telemetry data.
 
 #### statistics.go
 
@@ -263,78 +257,80 @@ Root command configuration using Cobra.
 
 ## Protocol Details
 
-### Helios Serial Protocol
+### Fusain Serial Protocol
 
 **Framing:**
 ```
 START_BYTE (0x7E)
 LENGTH (1 byte) - payload length
+ADDRESS (8 bytes) - device address (little-endian)
 TYPE (1 byte) - message type
-PAYLOAD (0-122 bytes)
+PAYLOAD (variable, 0-114 bytes)
 CRC_HIGH (1 byte)
 CRC_LOW (1 byte)
 END_BYTE (0x7F)
 ```
+
+**Special Addresses:**
+- `0x0000000000000000` - Broadcast (all devices)
+- `0xFFFFFFFFFFFFFFFF` - Stateless (routers, subscriptions)
 
 **Byte Stuffing:**
 - If data byte equals `START_BYTE`, `END_BYTE`, or `ESC_BYTE`:
   - Replace with: `ESC_BYTE` + (original ^ `ESC_XOR`)
 - Decoder handles unstuffing automatically
 
-**CRC:** CRC-16-CCITT over `[LENGTH, TYPE, PAYLOAD]`
+**CRC:** CRC-16-CCITT (big-endian) over `[LENGTH, ADDRESS, TYPE, PAYLOAD]`
 
-**Reference:** See `modules/lib/fusain/` for C implementation
+**References:**
+- **Specification:** `origin/documentation/source/specifications/fusain/` (canonical)
+- **C Implementation:** `modules/lib/fusain/`
+- **Go Implementation:** `tools/heliostat/pkg/fusain/` (this package)
 
 ### Message Types
 
-**Commands (Master → ICU):**
-- `0x10` SET_MODE - Change operating mode
-- `0x11` SET_PUMP_RATE - Set pump rate (ms)
-- `0x12` SET_TARGET_RPM - Set motor target RPM
-- `0x13` PING_REQUEST - Keepalive
-- `0x14` SET_TIMEOUT_CONFIG - Configure timeouts
-- `0x15` EMERGENCY_STOP - Emergency shutdown
-- `0x16` TELEMETRY_CONFIG - Enable/configure telemetry
+**Configuration Commands (Controller → Appliance, 0x10-0x1F):**
+- `0x10` MOTOR_CONFIG - Configure motor controller (48 bytes)
+- `0x11` PUMP_CONFIG - Configure pump controller (16 bytes)
+- `0x12` TEMPERATURE_CONFIG - Configure temperature controller (48 bytes)
+- `0x13` GLOW_CONFIG - Configure glow plug (16 bytes)
+- `0x14` DATA_SUBSCRIPTION - Subscribe to appliance data (8 bytes)
+- `0x15` DATA_UNSUBSCRIBE - Unsubscribe from data (8 bytes)
+- `0x16` TELEMETRY_CONFIG - Enable/disable telemetry (8 bytes)
+- `0x17` TIMEOUT_CONFIG - Configure communication timeout (8 bytes)
+- `0x1F` DISCOVERY_REQUEST - Request device capabilities (0 bytes)
 
-**Data (ICU → Master):**
-- `0x20` STATE_DATA - Current state and error
-- `0x21` MOTOR_DATA - Motor telemetry (individual)
-- `0x22` TEMPERATURE_DATA - Temperature telemetry (individual)
-- `0x23` PUMP_DATA - Pump telemetry
-- `0x24` GLOW_DATA - Glow plug telemetry
-- `0x25` TELEMETRY_BUNDLE - Combined telemetry (v1.2+)
-- `0x26` PING_RESPONSE - Ping acknowledgment
+**Control Commands (Controller → Appliance, 0x20-0x2F):**
+- `0x20` STATE_COMMAND - Set system mode/state (8 bytes)
+- `0x21` MOTOR_COMMAND - Set motor RPM (8 bytes)
+- `0x22` PUMP_COMMAND - Set pump rate (8 bytes)
+- `0x23` GLOW_COMMAND - Control glow plug (8 bytes)
+- `0x24` TEMPERATURE_COMMAND - Temperature controller control (20 bytes)
+- `0x25` SEND_TELEMETRY - Request telemetry (polling mode, 8 bytes)
+- `0x2F` PING_REQUEST - Heartbeat/connectivity check (0 bytes)
 
-**Errors:**
-- `0xE0` ERROR_INVALID_COMMAND - Unknown command
-- `0xE1` ERROR_INVALID_CRC - CRC validation failed
-- `0xE2` ERROR_INVALID_LENGTH - Payload length mismatch
-- `0xE3` ERROR_TIMEOUT - Communication timeout
+**Telemetry Data (Appliance → Controller, 0x30-0x3F):**
+- `0x30` STATE_DATA - System state and status (16 bytes)
+- `0x31` MOTOR_DATA - Motor telemetry (32 bytes)
+- `0x32` PUMP_DATA - Pump status and events (16 bytes)
+- `0x33` GLOW_DATA - Glow plug status (12 bytes)
+- `0x34` TEMPERATURE_DATA - Temperature readings (32 bytes)
+- `0x35` DEVICE_ANNOUNCE - Device capabilities (8 bytes)
+- `0x3F` PING_RESPONSE - Heartbeat response (4 bytes)
 
-### Telemetry Bundle Structure (0x25)
+**Errors (Bidirectional, 0xE0-0xEF):**
+- `0xE0` ERROR_INVALID_CMD - Command validation failed (4 bytes)
+- `0xE1` ERROR_STATE_REJECT - Command rejected by state machine (4 bytes)
 
-```
-Offset  Size  Field
-0-3     4     state (u32, little-endian)
-4       1     error (u8)
-5       1     motor_count (u8)
-6       1     temp_count (u8)
-7+      16*N  motor data (N = motor_count)
-        8*M   temperature data (M = temp_count)
-```
+### Payload Structures
 
-**Motor Data (16 bytes):**
-```
-0-3     rpm (i32)
-4-7     target_rpm (i32)
-8-11    pwm_duty (i32, nanoseconds)
-12-15   pwm_period (i32, nanoseconds)
-```
+See the Fusain protocol specification for detailed payload structures:
+`origin/documentation/source/specifications/fusain/packet-payloads.rst`
 
-**Temperature Data (8 bytes):**
-```
-0-7     temperature (f64, IEEE 754, little-endian)
-```
+**Key payload notes:**
+- All multi-byte integers are little-endian (except CRC which is big-endian)
+- DEVICE_ANNOUNCE counts are u8 (1 byte each): motor_count, temp_count, pump_count, glow_count
+- Temperature and PID values use f64 (8-byte IEEE 754 floats)
 
 ---
 
@@ -351,8 +347,13 @@ Produces `heliostat` binary in current directory.
 ### Testing
 
 ```bash
-go test ./...
+task fusain:test           # Run all tests with 1000 fuzz rounds
+task fusain:test -- 10000  # Run with custom fuzz round count
+task fusain:ci             # Run CI checks (format, vet, 100k fuzz rounds)
+task fusain:coverage       # Generate coverage report
 ```
+
+**Test Coverage:** The `pkg/fusain/` package maintains 100% test coverage.
 
 **Manual Testing:**
 1. Connect to Helios UART (e.g., `/dev/ttyUSB0`)
@@ -404,7 +405,7 @@ go mod tidy
        // Implementation...
    }
    ```
-3. Use `helios_protocol` package for decoding/formatting
+3. Use `fusain` package for decoding/formatting
 4. Rebuild and test
 
 ---
@@ -413,7 +414,7 @@ go mod tidy
 
 ### Adding New Message Type
 
-1. Add constant to `pkg/helios_protocol/constants.go`
+1. Add constant to `pkg/fusain/constants.go`
 2. Add case to `FormatMessageType()` in `formatter.go`
 3. Add payload formatter to `FormatPayload()` in `formatter.go`
 4. If validation needed, add case to `ValidatePacket()` in `validator.go`
@@ -436,13 +437,18 @@ go mod tidy
 
 ## Relationship to Other Projects
 
+### Fusain Protocol Specification
+
+**Location:** `origin/documentation/source/specifications/fusain/`
+
+**Relationship:** The Sphinx documentation is the canonical specification. Both C and Go
+implementations follow this specification.
+
 ### Fusain Library (C)
 
 **Location:** `modules/lib/fusain/`
 
-**Relationship:** Heliostat implements the same protocol as Fusain in Go.
-
-**Protocol Specification:** `../../origin/docs/protocols/serial_protocol.md` (Fusain Protocol v2.0)
+**Relationship:** Heliostat's `pkg/fusain/` implements the same protocol in Go.
 
 **Shared Concepts:**
 - Protocol constants (message types, framing bytes)
@@ -451,8 +457,8 @@ go mod tidy
 - State machine decoder
 
 **Differences:**
-- Fusain is for embedded C (Zephyr RTOS)
-- Heliostat is for desktop analysis (Go)
+- Fusain (C) is for embedded systems (Zephyr RTOS)
+- Heliostat's `pkg/fusain/` (Go) is the reference Go implementation for desktop tools
 
 ### Slate Firmware (C)
 
@@ -461,9 +467,8 @@ go mod tidy
 **Relationship:** Slate uses Fusain to communicate with Helios. Heliostat helps debug that communication.
 
 **Validation Alignment:**
-- Heliostat's `motor_count <= 10` rule matches Slate's validation
-- Heliostat's `temp_count <= 10` rule matches Slate's validation
-- Heliostat's RPM > 6000 warning matches Slate's filtering
+- Heliostat's validation rules match protocol limits defined in the specification
+- Validation thresholds align with Slate's filtering
 
 ### Helios Firmware (C)
 
@@ -481,7 +486,7 @@ go mod tidy
 
 **Import cycle:** Ensure no circular imports between package files
 
-**Undefined reference:** Check package name matches directory name (`helios_protocol`)
+**Undefined reference:** Check package name matches directory name (`fusain`)
 
 **Version conflicts:** Run `go mod tidy` to resolve dependencies
 
@@ -499,7 +504,7 @@ go mod tidy
 
 ## Git Workflow
 
-**IMPORTANT:** This tool is part of the Thermoquad organization. Follow the git workflow documented in `/home/kazw/Projects/Thermoquad/CLAUDE.md`.
+**IMPORTANT:** This tool is part of the Thermoquad organization. Follow the git workflow documented in `../../CLAUDE.md`.
 
 **Summary:**
 1. Show changes with `git diff`
@@ -541,15 +546,22 @@ Co-Authored-By: Claude Sonnet 4.5 <noreply@anthropic.com>
 - Serial Port: https://pkg.go.dev/go.bug.st/serial
 
 **Protocol Reference:**
-- Fusain library: `modules/lib/fusain/CLAUDE.md`
+- Fusain Specification: `origin/documentation/source/specifications/fusain/` (canonical)
+- Fusain library (C): `modules/lib/fusain/CLAUDE.md`
 - Helios firmware: `apps/helios/CLAUDE.md`
 - Slate firmware: `apps/slate/CLAUDE.md`
 
 **Organization:**
-- Thermoquad CLAUDE.md: `/home/kazw/Projects/Thermoquad/CLAUDE.md`
+- Thermoquad CLAUDE.md: `../../CLAUDE.md`
 
 ---
 
-**Last Updated:** 2026-01-04
+## AI Assistant Operations
+
+To reload all organization CLAUDE.md files or run a content integrity check, see the **CLAUDE.md Reload** and **Content Integrity Check** sections in the [Thermoquad Organization CLAUDE.md](../../CLAUDE.md).
+
+---
+
+**Last Updated:** 2026-01-09
 
 **Maintainer:** Kaz Walker

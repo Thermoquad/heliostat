@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-2.0-or-later
 // Copyright (c) 2025 Kaz Walker, Thermoquad
 
 package cmd
@@ -8,7 +8,7 @@ import (
 	"log"
 	"time"
 
-	"github.com/Thermoquad/heliostat/pkg/helios_protocol"
+	"github.com/Thermoquad/heliostat/pkg/fusain"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/spf13/cobra"
 	"go.bug.st/serial"
@@ -74,36 +74,34 @@ func printDecodeError(err error) {
 }
 
 // printPingResponse prints a ping response with uptime
-func printPingResponse(packet *helios_protocol.Packet) {
+func printPingResponse(packet *fusain.Packet) {
 	timestamp := packet.Timestamp().Format("15:04:05.000")
 	payload := packet.Payload()
 
-	// Extract uptime (8 bytes, little-endian)
-	if len(payload) < 8 {
+	// Extract uptime (4 bytes, little-endian per spec)
+	if len(payload) < 4 {
 		fmt.Printf("[%s] \033[1;32mPING_RESPONSE:\033[0m Invalid payload length (%d bytes)\n\n", timestamp, len(payload))
 		return
 	}
 
 	uptime := uint64(payload[0]) | uint64(payload[1])<<8 |
-		uint64(payload[2])<<16 | uint64(payload[3])<<24 |
-		uint64(payload[4])<<32 | uint64(payload[5])<<40 |
-		uint64(payload[6])<<48 | uint64(payload[7])<<56
+		uint64(payload[2])<<16 | uint64(payload[3])<<24
 
 	uptimeStr := formatUptime(uptime)
 	fmt.Printf("[%s] \033[1;32mPING_RESPONSE:\033[0m Helios uptime: %s\n\n", timestamp, uptimeStr)
 }
 
 // printValidationErrors prints validation errors for a packet
-func printValidationErrors(packet *helios_protocol.Packet, errors []helios_protocol.ValidationError) {
+func printValidationErrors(packet *fusain.Packet, errors []fusain.ValidationError) {
 	timestamp := packet.Timestamp().Format("15:04:05.000")
-	msgType := helios_protocol.FormatMessageType(packet.Type())
+	msgType := fusain.FormatMessageType(packet.Type())
 
 	fmt.Printf("[%s] \033[1;33mVALIDATION ERROR:\033[0m %s (0x%02X)\n", timestamp, msgType, packet.Type())
 	fmt.Printf("  CRC: \033[1;32mOK\033[0m\n")
 
 	for i, err := range errors {
 		switch err.Type {
-		case helios_protocol.ANOMALY_INVALID_COUNT:
+		case fusain.ANOMALY_INVALID_COUNT:
 			fmt.Printf("  Issue %d: \033[1;31m%s\033[0m\n", i+1, err.Message)
 			if motorCount, ok := err.Details["motor_count"].(uint8); ok {
 				fmt.Printf("    motor_count=%d (max 10)\n", motorCount)
@@ -112,7 +110,7 @@ func printValidationErrors(packet *helios_protocol.Packet, errors []helios_proto
 				fmt.Printf("    temp_count=%d (max 10)\n", tempCount)
 			}
 
-		case helios_protocol.ANOMALY_LENGTH_MISMATCH:
+		case fusain.ANOMALY_LENGTH_MISMATCH:
 			fmt.Printf("  Issue %d: \033[1;31m%s\033[0m\n", i+1, err.Message)
 			if received, ok := err.Details["received"].(int); ok {
 				if expected, ok := err.Details["expected"].(int); ok {
@@ -120,7 +118,7 @@ func printValidationErrors(packet *helios_protocol.Packet, errors []helios_proto
 				}
 			}
 
-		case helios_protocol.ANOMALY_HIGH_RPM:
+		case fusain.ANOMALY_HIGH_RPM:
 			fmt.Printf("  Issue %d: \033[1;33m%s\033[0m\n", i+1, err.Message)
 			if rpm, ok := err.Details["rpm"].(int32); ok {
 				if targetRPM, ok := err.Details["target_rpm"].(int32); ok {
@@ -128,13 +126,13 @@ func printValidationErrors(packet *helios_protocol.Packet, errors []helios_proto
 				}
 			}
 
-		case helios_protocol.ANOMALY_INVALID_TEMP:
+		case fusain.ANOMALY_INVALID_TEMP:
 			fmt.Printf("  Issue %d: \033[1;33m%s\033[0m\n", i+1, err.Message)
 			if temp, ok := err.Details["value"].(float64); ok {
 				fmt.Printf("    Temperature=%.1f°C (valid: -50 to 1000°C)\n", temp)
 			}
 
-		case helios_protocol.ANOMALY_INVALID_PWM:
+		case fusain.ANOMALY_INVALID_PWM:
 			fmt.Printf("  Issue %d: \033[1;33m%s\033[0m\n", i+1, err.Message)
 			if duty, ok := err.Details["pwm_duty"].(int32); ok {
 				if period, ok := err.Details["pwm_period"].(int32); ok {
@@ -147,12 +145,14 @@ func printValidationErrors(packet *helios_protocol.Packet, errors []helios_proto
 		}
 	}
 
-	// Print packet header for context
+	// Print packet header for context (STATE_DATA contains state and error code)
 	stateNames := []string{"INITIALIZING", "IDLE", "BLOWING", "PREHEAT", "PREHEAT_STAGE_2", "HEATING", "COOLING", "ERROR", "E_STOP"}
-	if packet.Type() == helios_protocol.MSG_TELEMETRY_BUNDLE && len(packet.Payload()) >= 7 {
-		state := uint32(packet.Payload()[0]) | uint32(packet.Payload()[1])<<8 |
-			uint32(packet.Payload()[2])<<16 | uint32(packet.Payload()[3])<<24
-		errorCode := packet.Payload()[4]
+	if packet.Type() == fusain.MSG_STATE_DATA && len(packet.Payload()) >= 16 {
+		// STATE_DATA payload per spec: error(4) + code(4) + state(4) + timestamp(4)
+		state := uint32(packet.Payload()[8]) | uint32(packet.Payload()[9])<<8 |
+			uint32(packet.Payload()[10])<<16 | uint32(packet.Payload()[11])<<24
+		errorCode := uint32(packet.Payload()[4]) | uint32(packet.Payload()[5])<<8 |
+			uint32(packet.Payload()[6])<<16 | uint32(packet.Payload()[7])<<24
 		stateName := "UNKNOWN"
 		if int(state) < len(stateNames) {
 			stateName = stateNames[state]
@@ -165,7 +165,7 @@ func printValidationErrors(packet *helios_protocol.Packet, errors []helios_proto
 
 // runTUIMode runs error detection in TUI mode
 func runTUIMode(port serial.Port) error {
-	decoder := helios_protocol.NewDecoder()
+	decoder := fusain.NewDecoder()
 	synchronized := false
 	invalidBytesBeforeSync := 0
 
@@ -209,7 +209,7 @@ func runTUIMode(port serial.Port) error {
 					}
 
 					// Validate packet
-					validationErrors := helios_protocol.ValidatePacket(packet)
+					validationErrors := fusain.ValidatePacket(packet)
 					p.Send(serialDataMsg{
 						packet:           packet,
 						decodeErr:        nil,
@@ -240,8 +240,8 @@ func runTextMode(port serial.Port) error {
 	}
 	fmt.Printf("Press Ctrl+C to exit\n\n")
 
-	decoder := helios_protocol.NewDecoder()
-	stats := helios_protocol.NewStatistics()
+	decoder := fusain.NewDecoder()
+	stats := fusain.NewStatistics()
 	buf := make([]byte, 128)
 
 	// Sync tracking - ignore decode errors until first valid packet
@@ -297,18 +297,18 @@ func runTextMode(port serial.Port) error {
 					}
 
 					// Validate packet
-					validationErrors := helios_protocol.ValidatePacket(packet)
+					validationErrors := fusain.ValidatePacket(packet)
 					stats.Update(packet, nil, validationErrors)
 
 					// Print packet or error based on mode
 					if len(validationErrors) > 0 {
 						printValidationErrors(packet, validationErrors)
-					} else if packet.Type() == helios_protocol.MSG_PING_RESPONSE {
+					} else if packet.Type() == fusain.MSG_PING_RESPONSE {
 						// Always print ping responses (for debugging)
 						printPingResponse(packet)
 					} else if showAll {
 						// Print valid packet (only if --show-all flag is set)
-						fmt.Print(helios_protocol.FormatPacket(packet))
+						fmt.Print(fusain.FormatPacket(packet))
 					}
 				}
 			}

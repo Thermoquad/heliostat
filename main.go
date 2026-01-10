@@ -1,7 +1,7 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-2.0-or-later
 // Copyright (c) 2025 Kaz Walker, Thermoquad
 //
-// Heliostat - Helios Serial Protocol Analyzer
+// Heliostat - Fusain Protocol Analyzer
 //
 // A CLI tool for monitoring and analyzing Helios serial protocol packets
 // with commands for raw logging and advanced error detection.

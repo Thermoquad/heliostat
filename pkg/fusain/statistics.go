@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2025 Kaz Walker, Thermoquad
 
-package helios_protocol
+package fusain
 
 import (
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -46,8 +47,9 @@ func (s *Statistics) Update(packet *Packet, decodeErr error, validationErrors []
 
 	// Handle decode errors
 	if decodeErr != nil {
-		// Check if it's a CRC error (special case - only count as CRC error)
-		if len(decodeErr.Error()) > 0 && decodeErr.Error()[:12] == "CRC mismatch" {
+		errMsg := decodeErr.Error()
+		// Check if it's a CRC error
+		if strings.HasPrefix(errMsg, "CRC mismatch") {
 			s.CRCErrors++
 		} else {
 			// Other decode errors (framing, overflow, etc.)
@@ -60,20 +62,22 @@ func (s *Statistics) Update(packet *Packet, decodeErr error, validationErrors []
 	if len(validationErrors) > 0 {
 		for _, err := range validationErrors {
 			switch err.Type {
-			case ANOMALY_INVALID_COUNT:
+			case AnomalyInvalidCount:
 				s.InvalidCounts++
 				s.MalformedPackets++
-			case ANOMALY_LENGTH_MISMATCH:
+			case AnomalyLengthMismatch:
 				s.LengthMismatches++
 				s.MalformedPackets++
-			case ANOMALY_HIGH_RPM:
+			case AnomalyHighRPM:
 				s.HighRPM++
 				s.AnomalousValues++
-			case ANOMALY_INVALID_TEMP:
+			case AnomalyInvalidTemp:
 				s.InvalidTemp++
 				s.AnomalousValues++
-			case ANOMALY_INVALID_PWM:
+			case AnomalyInvalidPWM:
 				s.InvalidPWM++
+				s.AnomalousValues++
+			case AnomalyInvalidValue:
 				s.AnomalousValues++
 			}
 		}
