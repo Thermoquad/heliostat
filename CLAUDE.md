@@ -22,6 +22,7 @@ Heliostat is a Go CLI tool for monitoring and analyzing Fusain protocol packets 
 - **Language:** Go 1.25.5
 - **CLI Framework:** Cobra (github.com/spf13/cobra)
 - **Serial I/O:** go.bug.st/serial
+- **CBOR:** fxamacker/cbor/v2
 - **Module:** github.com/Thermoquad/heliostat
 
 ### Directory Structure
@@ -44,17 +45,19 @@ heliostat/
         ├── go.mod                   # Standalone module for external imports
         ├── Taskfile.dist.yml        # Fusain-specific tasks (test, coverage, ci)
         ├── constants.go             # Protocol constants
-        ├── packet.go                # Packet structure with 8-byte addressing
+        ├── packet.go                # Packet structure with CBOR payload
         ├── decoder.go               # State machine decoder
+        ├── cbor.go                  # CBOR parsing helpers
         ├── crc.go                   # CRC-16-CCITT
         ├── formatter.go             # Packet formatting (all message types)
         ├── validator.go             # Validation and anomaly detection
         ├── statistics.go            # Statistics tracking
-        └── fusain_test.go           # Comprehensive tests (100% coverage)
+        ├── fusain_test.go           # Comprehensive tests
+        └── fuzz_test.go             # Fuzz testing
 ```
 
 > **Note:** The `pkg/fusain/` package is a **separate Go module** that can be imported
-> independently by other Go tools. It has no external dependencies (stdlib only).
+> independently by other Go tools.
 >
 > **Import:** `import "github.com/Thermoquad/heliostat/pkg/fusain"`
 
@@ -64,28 +67,41 @@ heliostat/
 
 ### Package: `fusain`
 
-Reference Go implementation of the Fusain protocol. Separate module with no external dependencies.
+Reference Go implementation of the Fusain protocol with CBOR-encoded payloads.
 
 #### constants.go
 
 Protocol-level constants:
-- Framing bytes: `START_BYTE (0x7E)`, `END_BYTE (0x7F)`, `ESC_BYTE (0x7D)`, `ESC_XOR (0x20)`
-- Size limits: `MAX_PACKET_SIZE (128)`, `MAX_PAYLOAD_SIZE (114)`, `ADDRESS_SIZE (8)`
-- CRC parameters: `CRC_POLYNOMIAL (0x1021)`, `CRC_INITIAL (0xFFFF)`
-- Special addresses: `ADDRESS_BROADCAST (0x0)`, `ADDRESS_STATELESS (0xFFFFFFFFFFFFFFFF)`
+- Framing bytes: `StartByte (0x7E)`, `EndByte (0x7F)`, `EscByte (0x7D)`, `EscXor (0x20)`
+- Size limits: `MaxPacketSize (128)`, `MaxPayloadSize (114)`, `AddressSize (8)`
+- CRC parameters: `CrcPolynomial (0x1021)`, `CrcInitial (0xFFFF)`
+- Special addresses: `AddressBroadcast (0x0)`, `AddressStateless (0xFFFFFFFFFFFFFFFF)`
 - Message types:
-  - Configuration Commands (0x10-0x1F): MOTOR_CONFIG, PUMP_CONFIG, TEMP_CONFIG, etc.
-  - Control Commands (0x20-0x2F): STATE_COMMAND, MOTOR_COMMAND, PING_REQUEST, etc.
-  - Telemetry Data (0x30-0x3F): STATE_DATA, MOTOR_DATA, TEMP_DATA, PING_RESPONSE, etc.
-  - Errors (0xE0-0xEF): ERROR_INVALID_CMD, ERROR_STATE_REJECT
-- Decoder states: `STATE_IDLE`, `STATE_LENGTH`, `STATE_ADDRESS`, `STATE_TYPE`, `STATE_PAYLOAD`, `STATE_CRC1`, `STATE_CRC2`
+  - Configuration Commands (0x10-0x1F): MsgMotorConfig, MsgPumpConfig, MsgTempConfig, etc.
+  - Control Commands (0x20-0x2F): MsgStateCommand, MsgMotorCommand, MsgPingRequest, etc.
+  - Telemetry Data (0x30-0x3F): MsgStateData, MsgMotorData, MsgTempData, MsgPingResponse, etc.
+  - Errors (0xE0-0xEF): MsgErrorInvalidCmd, MsgErrorStateReject
+- Decoder states: `stateIdle`, `stateLength`, `stateAddress`, `statePayload`, `stateCRC1`, `stateCRC2`
+
+#### cbor.go
+
+CBOR parsing functions using fxamacker/cbor/v2:
+- `ParseCBORMessage(data []byte) (msgType uint8, payload map[int]interface{}, err error)`
+- `GetMapUint(m map[int]interface{}, key int) (uint64, bool)`
+- `GetMapInt(m map[int]interface{}, key int) (int64, bool)`
+- `GetMapFloat(m map[int]interface{}, key int) (float64, bool)`
+- `GetMapBool(m map[int]interface{}, key int) (bool, bool)`
+- `GetMapBytes(m map[int]interface{}, key int) ([]byte, bool)`
 
 #### packet.go
 
 **Type: `Packet`**
-- Fields: `length`, `address`, `msgType`, `payload`, `crc`, `timestamp`
-- Methods: `Length()`, `Address()`, `Type()`, `Payload()`, `CRC()`, `Timestamp()`, `IsBroadcast()`, `IsStateless()`
-- Constructor: `NewPacket(length, address, msgType, payload, crc) *Packet`
+- Fields: `length`, `address`, `cborPayload`, `crc`, `timestamp` (plus cached parsed values)
+- Methods: `Length()`, `Address()`, `Type()`, `Payload()`, `PayloadMap()`, `ParseError()`, `CRC()`, `Timestamp()`, `IsBroadcast()`, `IsStateless()`
+- Constructor: `NewPacket(length, address, cborPayload, crc) *Packet`
+
+**Lazy CBOR Parsing:** The message type and payload map are parsed from CBOR on first access
+and cached for subsequent calls.
 
 #### decoder.go
 
@@ -101,14 +117,15 @@ Protocol-level constants:
 - `GetRawBytes() []byte` - Get accumulated raw bytes (for debugging)
 
 **State Machine:**
-1. `STATE_IDLE` - Waiting for `START_BYTE`
-2. `STATE_LENGTH` - Read payload length
-3. `STATE_ADDRESS` - Read 8-byte address (little-endian)
-4. `STATE_TYPE` - Read message type
-5. `STATE_PAYLOAD` - Read payload bytes
-6. `STATE_CRC1` - Read CRC high byte
-7. `STATE_CRC2` - Read CRC low byte
-8. Return to idle on `END_BYTE` after validating CRC
+1. `stateIdle` - Waiting for `StartByte`
+2. `stateLength` - Read CBOR payload length
+3. `stateAddress` - Read 8-byte address (little-endian)
+4. `statePayload` - Read CBOR payload bytes (includes message type)
+5. `stateCRC1` - Read CRC high byte
+6. `stateCRC2` - Read CRC low byte
+7. Return to idle on `EndByte` after validating CRC
+
+**Note:** There is no separate `stateType` - the message type is embedded in the CBOR payload.
 
 #### crc.go
 
@@ -121,23 +138,18 @@ Protocol-level constants:
 
 **Functions:**
 - `FormatPacket(p *Packet) string` - Human-readable packet format with timestamp
-- `FormatMessageType(msgType uint8) string` - Message type name (e.g., "TELEMETRY_BUNDLE")
-- `FormatPayload(msgType uint8, payload []byte) string` - Payload interpretation
+- `FormatMessageType(msgType uint8) string` - Message type name (e.g., "STATE_DATA")
+- `FormatPayloadMap(msgType uint8, m map[int]interface{}) string` - Payload interpretation from CBOR map
 
 **Payload Formatting:**
-- Parses payload based on message type
+- Parses CBOR map using integer keys per CDDL specification
 - Extracts fields (state, error, motor data, temperatures, etc.)
-- Formats multi-byte integers (little-endian)
-- Converts float64 from bits using `unsafe.Pointer`
-
-**Helper Functions:**
-- `formatDuration(ms uint64) string` - Human-readable uptime (e.g., "1 hour and 23 minutes")
-- `float64frombits(b uint64) float64` - Convert uint64 bits to float64
+- Uses `GetMapUint()`, `GetMapInt()`, `GetMapFloat()`, `GetMapBool()` helpers
 
 #### validator.go
 
 **Type: `AnomalyType`**
-- Enum: `ANOMALY_INVALID_COUNT`, `ANOMALY_LENGTH_MISMATCH`, `ANOMALY_HIGH_RPM`, `ANOMALY_INVALID_TEMP`, `ANOMALY_INVALID_PWM`
+- Enum: `AnomalyInvalidCount`, `AnomalyLengthMismatch`, `AnomalyHighRPM`, `AnomalyInvalidTemp`, `AnomalyInvalidPWM`, `AnomalyInvalidValue`, `AnomalyCRCError`, `AnomalyDecodeError`
 
 **Type: `ValidationError`**
 - Fields: `Type`, `Message`, `Details` (map with context)
@@ -145,11 +157,10 @@ Protocol-level constants:
 
 **Function: `ValidatePacket(p *Packet) []ValidationError`**
 - Returns slice of validation errors (empty if valid)
-- Validates based on message type
+- Validates based on message type using CBOR map keys
 
 **Validation Rules:**
-
-See `pkg/fusain/validator.go` for current validation rules. Validates message structure, count limits, and value ranges for telemetry data.
+Validators use CBOR map helpers to extract values. See `pkg/fusain/validator.go` for current validation rules.
 
 #### statistics.go
 
@@ -182,7 +193,6 @@ Root command configuration using Cobra.
 **Initialization:**
 - Registers subcommands (`raw_log`, `error_detection`)
 - Marks `--port` as required
-- Defines version (2.0.0)
 
 #### cmd/raw_log.go
 
@@ -224,6 +234,7 @@ Root command configuration using Cobra.
 - Shows header with connection info and controls
 - Sync status indicator (waiting/synchronized)
 - Live statistics box (total, valid, errors, rates) - updates continuously in real-time
+- Live telemetry display (state, uptime, motors, temperatures)
 - Scrolling error log with timestamps
 - Press 'q' to quit
 - Note: `--stats-interval` flag is ignored in TUI mode (statistics always update live)
@@ -231,7 +242,7 @@ Root command configuration using Cobra.
 **Text Mode (`--tui=false`):**
 - Decode errors: Red, shows CRC mismatch or framing issue
 - Validation errors: Yellow/red, shows issue type and details
-- Includes packet context (state, error code) for telemetry bundles
+- Includes packet context (state, error code) for telemetry data
 - Statistics printed at intervals
 
 #### cmd/tui.go
@@ -240,16 +251,25 @@ Root command configuration using Cobra.
 - Built using Bubbletea framework
 - Receives messages from serial goroutine
 - Updates display in real-time
+- Parses telemetry from CBOR payload maps
 
 **Messages:**
 - `tickMsg` - 1-second ticker for rate calculations
 - `serialDataMsg` - Packet data, decode errors, validation errors
 - `syncMsg` - First packet received (synchronized)
 
+**Telemetry Parsing:**
+Uses `packet.PayloadMap()` and CBOR map helpers to extract:
+- STATE_DATA: state (key 2), error code (key 1)
+- PING_RESPONSE: uptime (key 0)
+- MOTOR_DATA: motor index (key 0), rpm (key 2), target (key 3)
+- TEMP_DATA: thermometer index (key 0), reading (key 2)
+
 **Display Components:**
 - Header: Title, port info, mode, controls
 - Sync status: Waiting or synchronized (with invalid byte count)
 - Statistics box: Formatted with colors (errors in red, values in green)
+- Telemetry box: State, uptime, motor RPMs, temperatures
 - Event log: Scrolling list of recent errors/warnings with timestamps
 - Auto-sizing to terminal dimensions
 
@@ -259,28 +279,37 @@ Root command configuration using Cobra.
 
 ### Fusain Serial Protocol
 
-**Framing:**
+**Wire Format:**
 ```
 START_BYTE (0x7E)
-LENGTH (1 byte) - payload length
+LENGTH (1 byte) - CBOR payload length
 ADDRESS (8 bytes) - device address (little-endian)
-TYPE (1 byte) - message type
-PAYLOAD (variable, 0-114 bytes)
+CBOR_PAYLOAD (variable) - [msg_type, payload_map]
 CRC_HIGH (1 byte)
 CRC_LOW (1 byte)
 END_BYTE (0x7F)
 ```
+
+The message type is embedded in the CBOR payload as the first element of a 2-element array.
+There is no separate TYPE byte in the framing layer.
+
+**CBOR Payload Format:**
+```
+[msg_type, payload_map]
+```
+- `msg_type`: Unsigned integer (0x00-0xFF)
+- `payload_map`: CBOR map with integer keys, or `nil` for empty payloads
 
 **Special Addresses:**
 - `0x0000000000000000` - Broadcast (all devices)
 - `0xFFFFFFFFFFFFFFFF` - Stateless (routers, subscriptions)
 
 **Byte Stuffing:**
-- If data byte equals `START_BYTE`, `END_BYTE`, or `ESC_BYTE`:
-  - Replace with: `ESC_BYTE` + (original ^ `ESC_XOR`)
+- If data byte equals `StartByte`, `EndByte`, or `EscByte`:
+  - Replace with: `EscByte` + (original ^ `EscXor`)
 - Decoder handles unstuffing automatically
 
-**CRC:** CRC-16-CCITT (big-endian) over `[LENGTH, ADDRESS, TYPE, PAYLOAD]`
+**CRC:** CRC-16-CCITT (big-endian) over `[LENGTH, ADDRESS, CBOR_PAYLOAD]`
 
 **References:**
 - **Specification:** `origin/documentation/source/specifications/fusain/` (canonical)
@@ -290,47 +319,52 @@ END_BYTE (0x7F)
 ### Message Types
 
 **Configuration Commands (Controller → Appliance, 0x10-0x1F):**
-- `0x10` MOTOR_CONFIG - Configure motor controller (48 bytes)
-- `0x11` PUMP_CONFIG - Configure pump controller (16 bytes)
-- `0x12` TEMPERATURE_CONFIG - Configure temperature controller (48 bytes)
-- `0x13` GLOW_CONFIG - Configure glow plug (16 bytes)
-- `0x14` DATA_SUBSCRIPTION - Subscribe to appliance data (8 bytes)
-- `0x15` DATA_UNSUBSCRIBE - Unsubscribe from data (8 bytes)
-- `0x16` TELEMETRY_CONFIG - Enable/disable telemetry (8 bytes)
-- `0x17` TIMEOUT_CONFIG - Configure communication timeout (8 bytes)
-- `0x1F` DISCOVERY_REQUEST - Request device capabilities (0 bytes)
+- `0x10` MOTOR_CONFIG - Configure motor controller
+- `0x11` PUMP_CONFIG - Configure pump controller
+- `0x12` TEMPERATURE_CONFIG - Configure temperature controller
+- `0x13` GLOW_CONFIG - Configure glow plug
+- `0x14` DATA_SUBSCRIPTION - Subscribe to appliance data
+- `0x15` DATA_UNSUBSCRIBE - Unsubscribe from data
+- `0x16` TELEMETRY_CONFIG - Enable/disable telemetry
+- `0x17` TIMEOUT_CONFIG - Configure communication timeout
+- `0x1F` DISCOVERY_REQUEST - Request device capabilities
 
 **Control Commands (Controller → Appliance, 0x20-0x2F):**
-- `0x20` STATE_COMMAND - Set system mode/state (8 bytes)
-- `0x21` MOTOR_COMMAND - Set motor RPM (8 bytes)
-- `0x22` PUMP_COMMAND - Set pump rate (8 bytes)
-- `0x23` GLOW_COMMAND - Control glow plug (8 bytes)
-- `0x24` TEMPERATURE_COMMAND - Temperature controller control (20 bytes)
-- `0x25` SEND_TELEMETRY - Request telemetry (polling mode, 8 bytes)
-- `0x2F` PING_REQUEST - Heartbeat/connectivity check (0 bytes)
+- `0x20` STATE_COMMAND - Set system mode/state
+- `0x21` MOTOR_COMMAND - Set motor RPM
+- `0x22` PUMP_COMMAND - Set pump rate
+- `0x23` GLOW_COMMAND - Control glow plug
+- `0x24` TEMPERATURE_COMMAND - Temperature controller control
+- `0x25` SEND_TELEMETRY - Request telemetry (polling mode)
+- `0x2F` PING_REQUEST - Heartbeat/connectivity check
 
 **Telemetry Data (Appliance → Controller, 0x30-0x3F):**
-- `0x30` STATE_DATA - System state and status (16 bytes)
-- `0x31` MOTOR_DATA - Motor telemetry (32 bytes)
-- `0x32` PUMP_DATA - Pump status and events (16 bytes)
-- `0x33` GLOW_DATA - Glow plug status (12 bytes)
-- `0x34` TEMPERATURE_DATA - Temperature readings (32 bytes)
-- `0x35` DEVICE_ANNOUNCE - Device capabilities (8 bytes)
-- `0x3F` PING_RESPONSE - Heartbeat response (4 bytes)
+- `0x30` STATE_DATA - System state and status
+- `0x31` MOTOR_DATA - Motor telemetry
+- `0x32` PUMP_DATA - Pump status and events
+- `0x33` GLOW_DATA - Glow plug status
+- `0x34` TEMPERATURE_DATA - Temperature readings
+- `0x35` DEVICE_ANNOUNCE - Device capabilities
+- `0x3F` PING_RESPONSE - Heartbeat response
 
 **Errors (Bidirectional, 0xE0-0xEF):**
-- `0xE0` ERROR_INVALID_CMD - Command validation failed (4 bytes)
-- `0xE1` ERROR_STATE_REJECT - Command rejected by state machine (4 bytes)
+- `0xE0` ERROR_INVALID_CMD - Command validation failed
+- `0xE1` ERROR_STATE_REJECT - Command rejected by state machine
 
-### Payload Structures
+### CBOR Payload Keys (per CDDL specification)
 
-See the Fusain protocol specification for detailed payload structures:
-`origin/documentation/source/specifications/fusain/packet-payloads.rst`
+| Message Type | Keys |
+|--------------|------|
+| STATE_DATA | 0=error(bool), 1=code, 2=state, 3=timestamp |
+| MOTOR_DATA | 0=motor, 1=timestamp, 2=rpm, 3=target, 4=max-rpm, 5=min-rpm, 6=pwm, 7=pwm-max |
+| TEMP_DATA | 0=thermometer, 1=timestamp, 2=reading, 3=temp-rpm-control, 4=watched-motor, 5=target-temp |
+| PING_RESPONSE | 0=uptime |
+| DEVICE_ANNOUNCE | 0=motor-count, 1=thermometer-count, 2=pump-count, 3=glow-count |
+| STATE_COMMAND | 0=mode, 1=argument (optional) |
+| GLOW_COMMAND | 0=glow, 1=duration |
 
-**Key payload notes:**
-- All multi-byte integers are little-endian (except CRC which is big-endian)
-- DEVICE_ANNOUNCE counts are u8 (1 byte each): motor_count, temp_count, pump_count, glow_count
-- Temperature and PID values use f64 (8-byte IEEE 754 floats)
+See the Fusain protocol specification for complete payload structures:
+`origin/documentation/source/specifications/fusain/`
 
 ---
 
@@ -353,7 +387,7 @@ task fusain:ci             # Run CI checks (format, vet, 100k fuzz rounds)
 task fusain:coverage       # Generate coverage report
 ```
 
-**Test Coverage:** The `pkg/fusain/` package maintains 100% test coverage.
+**Test Coverage:** The `pkg/fusain/` package maintains comprehensive test coverage.
 
 **Manual Testing:**
 1. Connect to Helios UART (e.g., `/dev/ttyUSB0`)
@@ -376,6 +410,7 @@ task fusain:coverage       # Generate coverage report
 - `go.bug.st/serial` - Serial port I/O
 - `github.com/charmbracelet/bubbletea` - Terminal UI framework
 - `github.com/charmbracelet/lipgloss` - Terminal styling
+- `github.com/fxamacker/cbor/v2` - CBOR encoding/decoding
 
 **Update:**
 ```bash
@@ -414,15 +449,15 @@ go mod tidy
 
 ### Adding New Message Type
 
-1. Add constant to `pkg/fusain/constants.go`
+1. Add constant to `pkg/fusain/constants.go` (e.g., `MsgNewType = 0xNN`)
 2. Add case to `FormatMessageType()` in `formatter.go`
-3. Add payload formatter to `FormatPayload()` in `formatter.go`
+3. Add payload formatter to `FormatPayloadMap()` in `formatter.go` using CBOR map keys
 4. If validation needed, add case to `ValidatePacket()` in `validator.go`
 
 ### Adding New Validation Rule
 
 1. Add `AnomalyType` to `validator.go`
-2. Implement validation logic in appropriate function
+2. Implement validation logic using `GetMapUint()`, `GetMapInt()`, etc.
 3. Update statistics counters in `statistics.go`
 4. Add error formatting in `cmd/error_detection.go`
 
@@ -454,7 +489,7 @@ implementations follow this specification.
 - Protocol constants (message types, framing bytes)
 - CRC-16-CCITT algorithm
 - Byte stuffing/unstuffing
-- State machine decoder
+- CBOR payload format with integer keys
 
 **Differences:**
 - Fusain (C) is for embedded systems (Zephyr RTOS)
@@ -476,7 +511,7 @@ implementations follow this specification.
 
 **Relationship:** Helios is the ICU that sends telemetry. Heliostat decodes and validates that telemetry.
 
-**Protocol Version:** Heliostat supports Fusain Protocol v2.0 (same as Helios)
+**Protocol:** Heliostat supports the Fusain Protocol with CBOR payloads
 
 ---
 
@@ -498,6 +533,8 @@ implementations follow this specification.
 
 **CRC errors:** May indicate communication issue (loose connection, electrical noise)
 
+**CBOR parse errors:** May indicate corrupted data or incompatible firmware
+
 **Malformed packets:** May indicate Helios firmware bug (use error_detection to diagnose)
 
 ---
@@ -516,25 +553,25 @@ implementations follow this specification.
 **Commit Style:** Conventional Commits
 
 **Scopes:**
-- `protocol` - Protocol package changes
+- `fusain` - Fusain package changes
 - `cmd` - CLI command changes
 - `docs` - Documentation updates
 - `deps` - Dependency updates
 
 **Example:**
 ```
-feat(protocol): add PWM duty validation to telemetry bundles
+feat(fusain): add new message type for XYZ
 
-Add validation to detect when PWM duty exceeds PWM period in motor data.
-This catches hardware configuration errors that could damage motors.
+Add support for XYZ message type with CBOR payload.
 
-Validation applied to:
-- TELEMETRY_BUNDLE motor data
-- MOTOR_DATA packets
+Changes:
+- Add MsgXYZ constant to constants.go
+- Add formatter for XYZ payload in formatter.go
+- Add validation rules in validator.go
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
 
-Co-Authored-By: Claude Sonnet 4.5 <noreply@anthropic.com>
+Co-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>
 ```
 
 ---
@@ -544,6 +581,7 @@ Co-Authored-By: Claude Sonnet 4.5 <noreply@anthropic.com>
 **Go Documentation:**
 - Cobra: https://github.com/spf13/cobra
 - Serial Port: https://pkg.go.dev/go.bug.st/serial
+- CBOR: https://github.com/fxamacker/cbor
 
 **Protocol Reference:**
 - Fusain Specification: `origin/documentation/source/specifications/fusain/` (canonical)
@@ -562,6 +600,6 @@ To reload all organization CLAUDE.md files or run a content integrity check, see
 
 ---
 
-**Last Updated:** 2026-01-09
+**Last Updated:** 2026-01-11
 
 **Maintainer:** Kaz Walker

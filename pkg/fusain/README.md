@@ -1,8 +1,6 @@
 # Fusain - Go Protocol Library
 
-Reference Go implementation of the Fusain serial protocol.
-
-**Protocol Version:** Fusain v2.0
+Reference Go implementation of the Fusain serial protocol with CBOR-encoded payloads.
 
 ## Overview
 
@@ -12,7 +10,7 @@ complementing the C implementation in `modules/lib/fusain/`.
 
 ## Features
 
-- **Zero Dependencies**: Uses only Go standard library
+- **CBOR Encoding**: Payloads use CBOR format with integer-keyed maps
 - **Standalone Module**: Can be imported independently by other Go tools
 - **Complete Protocol Support**: All message types, CRC, byte stuffing
 - **Validation**: Anomaly detection and packet validation
@@ -23,6 +21,10 @@ complementing the C implementation in `modules/lib/fusain/`.
 ```go
 import "github.com/Thermoquad/heliostat/pkg/fusain"
 ```
+
+## Dependencies
+
+- `github.com/fxamacker/cbor/v2` - CBOR encoding/decoding
 
 ## Usage
 
@@ -43,6 +45,12 @@ for _, b := range serialData {
         // Complete packet received
         fmt.Printf("Type: %s\n", fusain.FormatMessageType(packet.Type()))
         fmt.Printf("Address: 0x%016X\n", packet.Address())
+
+        // Access CBOR payload map
+        payloadMap := packet.PayloadMap()
+        if value, ok := fusain.GetMapUint(payloadMap, 0); ok {
+            fmt.Printf("Key 0: %d\n", value)
+        }
     }
 }
 ```
@@ -69,8 +77,35 @@ fmt.Println(output)
 // Message type name
 typeName := fusain.FormatMessageType(packet.Type())
 
-// Formatted payload
-payload := fusain.FormatPayload(packet.Type(), packet.Payload())
+// Formatted payload from CBOR map
+payloadStr := fusain.FormatPayloadMap(packet.Type(), packet.PayloadMap())
+```
+
+### Working with CBOR Payload Maps
+
+```go
+// Get typed values from payload map
+payloadMap := packet.PayloadMap()
+
+// Unsigned integer
+if val, ok := fusain.GetMapUint(payloadMap, 0); ok {
+    fmt.Printf("Key 0 (uint): %d\n", val)
+}
+
+// Signed integer
+if val, ok := fusain.GetMapInt(payloadMap, 1); ok {
+    fmt.Printf("Key 1 (int): %d\n", val)
+}
+
+// Float
+if val, ok := fusain.GetMapFloat(payloadMap, 2); ok {
+    fmt.Printf("Key 2 (float): %.2f\n", val)
+}
+
+// Boolean
+if val, ok := fusain.GetMapBool(payloadMap, 3); ok {
+    fmt.Printf("Key 3 (bool): %v\n", val)
+}
 ```
 
 ### Tracking Statistics
@@ -92,7 +127,7 @@ fmt.Printf("Total: %d, Valid: %d\n", stats.TotalPackets, stats.ValidPackets)
 
 ```go
 // Calculate CRC-16-CCITT
-data := []byte{0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x20}
+data := []byte{0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x82, 0x2F, 0xF6}
 crc := fusain.CalculateCRC(data)
 ```
 
@@ -109,8 +144,10 @@ type Packet struct {
 
 func (p *Packet) Length() uint8
 func (p *Packet) Address() uint64
-func (p *Packet) Type() uint8
-func (p *Packet) Payload() []byte
+func (p *Packet) Type() uint8           // Parsed from CBOR payload
+func (p *Packet) Payload() []byte       // Raw CBOR bytes
+func (p *Packet) PayloadMap() map[int]interface{}  // Decoded CBOR map
+func (p *Packet) ParseError() error     // CBOR parse error (if any)
 func (p *Packet) CRC() uint16
 func (p *Packet) Timestamp() time.Time
 func (p *Packet) IsBroadcast() bool
@@ -126,6 +163,17 @@ func NewDecoder() *Decoder
 func (d *Decoder) DecodeByte(b byte) (*Packet, error)
 func (d *Decoder) Reset()
 func (d *Decoder) GetRawBytes() []byte
+```
+
+#### CBOR Helpers
+
+```go
+func ParseCBORMessage(data []byte) (msgType uint8, payload map[int]interface{}, err error)
+func GetMapUint(m map[int]interface{}, key int) (uint64, bool)
+func GetMapInt(m map[int]interface{}, key int) (int64, bool)
+func GetMapFloat(m map[int]interface{}, key int) (float64, bool)
+func GetMapBool(m map[int]interface{}, key int) (bool, bool)
+func GetMapBytes(m map[int]interface{}, key int) ([]byte, bool)
 ```
 
 #### Statistics
@@ -163,25 +211,25 @@ func ValidatePacket(p *Packet) []ValidationError
 
 ```go
 // Framing
-const START_BYTE = 0x7E
-const END_BYTE = 0x7F
-const ESC_BYTE = 0x7D
-const ESC_XOR = 0x20
+const StartByte = 0x7E
+const EndByte = 0x7F
+const EscByte = 0x7D
+const EscXor = 0x20
 
 // Sizes
-const MAX_PACKET_SIZE = 128
-const MAX_PAYLOAD_SIZE = 114
-const ADDRESS_SIZE = 8
+const MaxPacketSize = 128
+const MaxPayloadSize = 114
+const AddressSize = 8
 
 // Special Addresses
-const ADDRESS_BROADCAST = 0x0
-const ADDRESS_STATELESS = 0xFFFFFFFFFFFFFFFF
+const AddressBroadcast = 0x0
+const AddressStateless = 0xFFFFFFFFFFFFFFFF
 
 // Message Types (see constants.go for full list)
-const MSG_STATE_COMMAND = 0x20
-const MSG_PING_REQUEST = 0x2F
-const MSG_STATE_DATA = 0x30
-const MSG_PING_RESPONSE = 0x3F
+const MsgStateCommand = 0x20
+const MsgPingRequest = 0x2F
+const MsgStateData = 0x30
+const MsgPingResponse = 0x3F
 // ... etc
 ```
 
@@ -190,16 +238,50 @@ const MSG_PING_RESPONSE = 0x3F
 ### Packet Format
 
 ```
-[START][LENGTH][ADDRESS(8)][TYPE][PAYLOAD(0-114)][CRC(2)][END]
-   │       │         │        │         │           │      │
-   │       │         │        │         │           │      └─ 0x7F
-   │       │         │        │         │           └─ CRC-16-CCITT (big-endian)
-   │       │         │        │         └─ Variable length payload
-   │       │         │        └─ Message type byte
+[START][LENGTH][ADDRESS(8)][CBOR_PAYLOAD][CRC(2)][END]
+   │       │         │            │          │      │
+   │       │         │            │          │      └─ 0x7F
+   │       │         │            │          └─ CRC-16-CCITT (big-endian)
+   │       │         │            └─ CBOR array: [msg_type, payload_map]
    │       │         └─ 64-bit device address (little-endian)
-   │       └─ Payload length (0-114)
+   │       └─ CBOR payload length (0-114)
    └─ 0x7E
 ```
+
+**Note:** The message type is embedded in the CBOR payload as the first
+element of a 2-element array. There is no separate TYPE byte in the framing.
+
+### CBOR Payload Format
+
+All payloads are encoded as a 2-element CBOR array:
+
+```
+[msg_type, payload_map]
+```
+
+- `msg_type`: Unsigned integer (0x00-0xFF)
+- `payload_map`: CBOR map with integer keys, or `nil` for empty payloads
+
+**Example - PING_REQUEST (empty payload):**
+```
+0x82 0x2F 0xF6  →  [47, nil]
+```
+
+**Example - STATE_DATA:**
+```
+0x82 0x30 0xA4 0x00 0xF4 0x01 0x00 0x02 0x01 0x03 0x1A ...
+→  [48, {0: false, 1: 0, 2: 1, 3: 12345}]
+```
+
+### CBOR Map Keys (per CDDL specification)
+
+| Message Type | Keys |
+|--------------|------|
+| STATE_DATA | 0=error(bool), 1=code, 2=state, 3=timestamp |
+| MOTOR_DATA | 0=motor, 1=timestamp, 2=rpm, 3=target, 4=max-rpm, 5=min-rpm, 6=pwm, 7=pwm-max |
+| TEMP_DATA | 0=thermometer, 1=timestamp, 2=reading, 3=temp-rpm-control, 4=watched-motor, 5=target-temp |
+| PING_RESPONSE | 0=uptime |
+| DEVICE_ANNOUNCE | 0=motor-count, 1=thermometer-count, 2=pump-count, 3=glow-count |
 
 ### Byte Stuffing
 
@@ -213,7 +295,7 @@ Special bytes in data are escaped:
 - Algorithm: CRC-16-CCITT
 - Polynomial: 0x1021
 - Initial value: 0xFFFF
-- Coverage: LENGTH + ADDRESS + TYPE + PAYLOAD
+- Coverage: LENGTH + ADDRESS + CBOR_PAYLOAD
 - Byte order: Big-endian in packet
 
 ## Testing

@@ -79,11 +79,11 @@ const (
 )
 
 // Decoder states (internal)
+// No separate TYPE state - type is embedded in CBOR payload
 const (
 	stateIdle = iota
 	stateLength
 	stateAddress
-	stateType
 	statePayload
 	stateCRC1
 	stateCRC2

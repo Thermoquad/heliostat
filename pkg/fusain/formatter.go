@@ -12,12 +12,13 @@ import (
 // FormatPacket formats a packet into a human-readable string
 func FormatPacket(p *Packet) string {
 	timestamp := p.timestamp.Format("15:04:05.000")
-	msgType := FormatMessageType(p.msgType)
+	msgType := FormatMessageType(p.Type())
 
-	result := fmt.Sprintf("[%s] %s (0x%02X) addr=%016X len=%d\n", timestamp, msgType, p.msgType, p.address, p.length)
+	result := fmt.Sprintf("[%s] %s (0x%02X) addr=%016X len=%d\n", timestamp, msgType, p.Type(), p.address, p.length)
 
-	if len(p.payload) > 0 {
-		result += FormatPayload(p.msgType, p.payload)
+	payloadMap := p.PayloadMap()
+	if payloadMap != nil || p.Type() == MsgPingRequest || p.Type() == MsgDiscoveryRequest {
+		result += FormatPayloadMap(p.Type(), payloadMap)
 	}
 
 	return result
@@ -89,271 +90,280 @@ func FormatMessageType(msgType uint8) string {
 	}
 }
 
-// FormatPayload formats the payload based on message type
-func FormatPayload(msgType uint8, payload []byte) string {
+// FormatPayloadMap formats the CBOR payload map based on message type
+func FormatPayloadMap(msgType uint8, m map[int]interface{}) string {
 	switch msgType {
 	case MsgPingRequest, MsgDiscoveryRequest:
 		return "  (no payload)\n"
 
 	case MsgPingResponse:
-		if len(payload) >= 4 {
-			uptime := uint32(payload[0]) | uint32(payload[1])<<8 | uint32(payload[2])<<16 | uint32(payload[3])<<24
-			return fmt.Sprintf("  Uptime: %s\n", formatDuration(uint64(uptime)))
-		}
+		// 0 => uptime-ms
+		uptime, _ := GetMapUint(m, 0)
+		return fmt.Sprintf("  Uptime: %s\n", formatDuration(uptime))
 
 	case MsgStateCommand:
-		if len(payload) >= 8 {
-			mode := uint32(payload[0]) | uint32(payload[1])<<8 | uint32(payload[2])<<16 | uint32(payload[3])<<24
-			arg := uint32(payload[4]) | uint32(payload[5])<<8 | uint32(payload[6])<<16 | uint32(payload[7])<<24
-			modeStr := formatMode(mode)
+		// 0 => mode, 1 => argument (optional)
+		mode, _ := GetMapUint(m, 0)
+		arg, hasArg := GetMapInt(m, 1)
+		modeStr := formatMode(uint32(mode))
+		if hasArg {
 			return fmt.Sprintf("  Mode: %s (%d), Argument: %d\n", modeStr, mode, arg)
 		}
+		return fmt.Sprintf("  Mode: %s (%d)\n", modeStr, mode)
 
 	case MsgStateData:
-		if len(payload) >= 16 {
-			errorFlag := uint32(payload[0]) | uint32(payload[1])<<8 | uint32(payload[2])<<16 | uint32(payload[3])<<24
-			code := int32(uint32(payload[4]) | uint32(payload[5])<<8 | uint32(payload[6])<<16 | uint32(payload[7])<<24)
-			state := uint32(payload[8]) | uint32(payload[9])<<8 | uint32(payload[10])<<16 | uint32(payload[11])<<24
-			timestamp := uint32(payload[12]) | uint32(payload[13])<<8 | uint32(payload[14])<<16 | uint32(payload[15])<<24
-			stateName := formatState(state)
-			errorStr := "No"
-			if errorFlag != 0 {
-				errorStr = "Yes"
-			}
-			return fmt.Sprintf("  State: %s (%d), Error: %s, Code: %s (%d), Time: %d ms\n",
-				stateName, state, errorStr, formatErrorCode(code), code, timestamp)
+		// 0 => error (bool), 1 => code, 2 => state, 3 => timestamp
+		errorFlag, _ := GetMapBool(m, 0)
+		code, _ := GetMapInt(m, 1)
+		state, _ := GetMapUint(m, 2)
+		timestamp, _ := GetMapUint(m, 3)
+		stateName := formatState(uint32(state))
+		errorStr := "No"
+		if errorFlag {
+			errorStr = "Yes"
 		}
+		return fmt.Sprintf("  State: %s (%d), Error: %s, Code: %s (%d), Time: %d ms\n",
+			stateName, state, errorStr, formatErrorCode(int32(code)), code, timestamp)
 
 	case MsgMotorCommand:
-		if len(payload) >= 8 {
-			motor := int32(uint32(payload[0]) | uint32(payload[1])<<8 | uint32(payload[2])<<16 | uint32(payload[3])<<24)
-			rpm := int32(uint32(payload[4]) | uint32(payload[5])<<8 | uint32(payload[6])<<16 | uint32(payload[7])<<24)
-			return fmt.Sprintf("  Motor: %d, Target RPM: %d\n", motor, rpm)
-		}
+		// 0 => motor, 1 => rpm
+		motor, _ := GetMapUint(m, 0)
+		rpm, _ := GetMapInt(m, 1)
+		return fmt.Sprintf("  Motor: %d, Target RPM: %d\n", motor, rpm)
 
 	case MsgPumpCommand:
-		if len(payload) >= 8 {
-			pump := int32(uint32(payload[0]) | uint32(payload[1])<<8 | uint32(payload[2])<<16 | uint32(payload[3])<<24)
-			rate := int32(uint32(payload[4]) | uint32(payload[5])<<8 | uint32(payload[6])<<16 | uint32(payload[7])<<24)
-			return fmt.Sprintf("  Pump: %d, Rate: %d ms\n", pump, rate)
-		}
+		// 0 => pump, 1 => rate-ms
+		pump, _ := GetMapUint(m, 0)
+		rate, _ := GetMapInt(m, 1)
+		return fmt.Sprintf("  Pump: %d, Rate: %d ms\n", pump, rate)
 
 	case MsgGlowCommand:
-		if len(payload) >= 8 {
-			glow := int32(uint32(payload[0]) | uint32(payload[1])<<8 | uint32(payload[2])<<16 | uint32(payload[3])<<24)
-			duration := int32(uint32(payload[4]) | uint32(payload[5])<<8 | uint32(payload[6])<<16 | uint32(payload[7])<<24)
-			return fmt.Sprintf("  Glow: %d, Duration: %d ms\n", glow, duration)
-		}
+		// 0 => glow, 1 => duration
+		glow, _ := GetMapUint(m, 0)
+		duration, _ := GetMapInt(m, 1)
+		return fmt.Sprintf("  Glow: %d, Duration: %d ms\n", glow, duration)
 
 	case MsgTempCommand:
-		if len(payload) >= 20 {
-			therm := int32(uint32(payload[0]) | uint32(payload[1])<<8 | uint32(payload[2])<<16 | uint32(payload[3])<<24)
-			cmdType := uint32(payload[4]) | uint32(payload[5])<<8 | uint32(payload[6])<<16 | uint32(payload[7])<<24
-			motorIdx := int32(uint32(payload[8]) | uint32(payload[9])<<8 | uint32(payload[10])<<16 | uint32(payload[11])<<24)
-			targetBits := uint64(payload[12]) | uint64(payload[13])<<8 | uint64(payload[14])<<16 | uint64(payload[15])<<24 |
-				uint64(payload[16])<<32 | uint64(payload[17])<<40 | uint64(payload[18])<<48 | uint64(payload[19])<<56
-			target := Float64frombits(targetBits)
-			cmdStr := formatTempCommandType(cmdType)
-			return fmt.Sprintf("  Thermometer: %d, Type: %s (%d), Motor: %d, Target: %.1f°C\n",
-				therm, cmdStr, cmdType, motorIdx, target)
+		// 0 => thermometer, 1 => type, 2 => motor-index (opt), 3 => target-temp (opt)
+		therm, _ := GetMapUint(m, 0)
+		cmdType, _ := GetMapUint(m, 1)
+		motorIdx, hasMotor := GetMapInt(m, 2)
+		target, hasTarget := GetMapFloat(m, 3)
+		cmdStr := formatTempCommandType(uint32(cmdType))
+		result := fmt.Sprintf("  Thermometer: %d, Type: %s (%d)", therm, cmdStr, cmdType)
+		if hasMotor {
+			result += fmt.Sprintf(", Motor: %d", motorIdx)
 		}
+		if hasTarget {
+			result += fmt.Sprintf(", Target: %.1f°C", target)
+		}
+		return result + "\n"
 
 	case MsgTelemetryConfig:
-		if len(payload) >= 8 {
-			enabled := uint32(payload[0]) | uint32(payload[1])<<8 | uint32(payload[2])<<16 | uint32(payload[3])<<24
-			interval := uint32(payload[4]) | uint32(payload[5])<<8 | uint32(payload[6])<<16 | uint32(payload[7])<<24
-			enabledStr := "Disabled"
-			if enabled != 0 {
-				enabledStr = "Enabled"
-			}
-			modeStr := "Broadcast"
-			if interval == 0 {
-				modeStr = "Polling"
-			}
-			return fmt.Sprintf("  Telemetry: %s, Interval: %d ms, Mode: %s\n", enabledStr, interval, modeStr)
+		// 0 => enabled (bool), 1 => interval-ms
+		enabled, _ := GetMapBool(m, 0)
+		interval, _ := GetMapUint(m, 1)
+		enabledStr := "Disabled"
+		if enabled {
+			enabledStr = "Enabled"
 		}
+		modeStr := "Broadcast"
+		if interval == 0 {
+			modeStr = "Polling"
+		}
+		return fmt.Sprintf("  Telemetry: %s, Interval: %d ms, Mode: %s\n", enabledStr, interval, modeStr)
 
 	case MsgTimeoutConfig:
-		if len(payload) >= 8 {
-			enabled := uint32(payload[0]) | uint32(payload[1])<<8 | uint32(payload[2])<<16 | uint32(payload[3])<<24
-			timeout := uint32(payload[4]) | uint32(payload[5])<<8 | uint32(payload[6])<<16 | uint32(payload[7])<<24
-			enabledStr := "Disabled"
-			if enabled != 0 {
-				enabledStr = "Enabled"
-			}
-			return fmt.Sprintf("  Timeout: %s, Interval: %d ms\n", enabledStr, timeout)
+		// 0 => enabled (bool), 1 => timeout-ms
+		enabled, _ := GetMapBool(m, 0)
+		timeout, _ := GetMapUint(m, 1)
+		enabledStr := "Disabled"
+		if enabled {
+			enabledStr = "Enabled"
 		}
+		return fmt.Sprintf("  Timeout: %s, Interval: %d ms\n", enabledStr, timeout)
 
 	case MsgSendTelemetry:
-		if len(payload) >= 8 {
-			telType := uint32(payload[0]) | uint32(payload[1])<<8 | uint32(payload[2])<<16 | uint32(payload[3])<<24
-			idx := uint32(payload[4]) | uint32(payload[5])<<8 | uint32(payload[6])<<16 | uint32(payload[7])<<24
-			typeStr := formatTelemetryType(telType)
-			idxStr := fmt.Sprintf("%d", idx)
-			if idx == 0xFFFFFFFF {
-				idxStr = "ALL"
-			}
-			return fmt.Sprintf("  Telemetry Type: %s (%d), Index: %s\n", typeStr, telType, idxStr)
+		// 0 => telemetry-type, 1 => index (optional)
+		telType, _ := GetMapUint(m, 0)
+		idx, hasIdx := GetMapUint(m, 1)
+		typeStr := formatTelemetryType(uint32(telType))
+		idxStr := "ALL"
+		if hasIdx && idx != 0xFFFFFFFF {
+			idxStr = fmt.Sprintf("%d", idx)
 		}
+		return fmt.Sprintf("  Telemetry Type: %s (%d), Index: %s\n", typeStr, telType, idxStr)
 
 	case MsgMotorData:
-		if len(payload) >= 32 {
-			motor := int32(uint32(payload[0]) | uint32(payload[1])<<8 | uint32(payload[2])<<16 | uint32(payload[3])<<24)
-			timestamp := uint32(payload[4]) | uint32(payload[5])<<8 | uint32(payload[6])<<16 | uint32(payload[7])<<24
-			rpm := int32(uint32(payload[8]) | uint32(payload[9])<<8 | uint32(payload[10])<<16 | uint32(payload[11])<<24)
-			target := int32(uint32(payload[12]) | uint32(payload[13])<<8 | uint32(payload[14])<<16 | uint32(payload[15])<<24)
-			maxRPM := int32(uint32(payload[16]) | uint32(payload[17])<<8 | uint32(payload[18])<<16 | uint32(payload[19])<<24)
-			minRPM := int32(uint32(payload[20]) | uint32(payload[21])<<8 | uint32(payload[22])<<16 | uint32(payload[23])<<24)
-			pwm := int32(uint32(payload[24]) | uint32(payload[25])<<8 | uint32(payload[26])<<16 | uint32(payload[27])<<24)
-			pwmMax := int32(uint32(payload[28]) | uint32(payload[29])<<8 | uint32(payload[30])<<16 | uint32(payload[31])<<24)
-			return fmt.Sprintf("  Motor %d: RPM=%d (target=%d), Range=[%d-%d], PWM=%d/%d µs, Time=%d ms\n",
-				motor, rpm, target, minRPM, maxRPM, pwm, pwmMax, timestamp)
+		// 0 => motor, 1 => timestamp, 2 => rpm, 3 => target
+		// 4 => max-rpm (opt), 5 => min-rpm (opt), 6 => pwm (opt), 7 => pwm-max (opt)
+		motor, _ := GetMapUint(m, 0)
+		timestamp, _ := GetMapUint(m, 1)
+		rpm, _ := GetMapInt(m, 2)
+		target, _ := GetMapInt(m, 3)
+		maxRPM, hasMax := GetMapInt(m, 4)
+		minRPM, hasMin := GetMapInt(m, 5)
+		pwm, hasPWM := GetMapUint(m, 6)
+		pwmMax, hasPWMMax := GetMapUint(m, 7)
+
+		result := fmt.Sprintf("  Motor %d: RPM=%d (target=%d)", motor, rpm, target)
+		if hasMin && hasMax {
+			result += fmt.Sprintf(", Range=[%d-%d]", minRPM, maxRPM)
 		}
+		if hasPWM && hasPWMMax {
+			result += fmt.Sprintf(", PWM=%d/%d µs", pwm, pwmMax)
+		}
+		result += fmt.Sprintf(", Time=%d ms\n", timestamp)
+		return result
 
 	case MsgPumpData:
-		if len(payload) >= 16 {
-			pump := int32(uint32(payload[0]) | uint32(payload[1])<<8 | uint32(payload[2])<<16 | uint32(payload[3])<<24)
-			timestamp := uint32(payload[4]) | uint32(payload[5])<<8 | uint32(payload[6])<<16 | uint32(payload[7])<<24
-			eventType := uint32(payload[8]) | uint32(payload[9])<<8 | uint32(payload[10])<<16 | uint32(payload[11])<<24
-			rate := int32(uint32(payload[12]) | uint32(payload[13])<<8 | uint32(payload[14])<<16 | uint32(payload[15])<<24)
-			eventStr := formatPumpEvent(eventType)
+		// 0 => pump, 1 => timestamp, 2 => type (event), 3 => rate (opt)
+		pump, _ := GetMapUint(m, 0)
+		timestamp, _ := GetMapUint(m, 1)
+		eventType, _ := GetMapUint(m, 2)
+		rate, hasRate := GetMapInt(m, 3)
+		eventStr := formatPumpEvent(uint32(eventType))
+		if hasRate {
 			return fmt.Sprintf("  Pump %d: Event=%s (%d), Rate=%d ms, Time=%d ms\n",
 				pump, eventStr, eventType, rate, timestamp)
 		}
+		return fmt.Sprintf("  Pump %d: Event=%s (%d), Time=%d ms\n",
+			pump, eventStr, eventType, timestamp)
 
 	case MsgGlowData:
-		if len(payload) >= 12 {
-			glow := int32(uint32(payload[0]) | uint32(payload[1])<<8 | uint32(payload[2])<<16 | uint32(payload[3])<<24)
-			timestamp := uint32(payload[4]) | uint32(payload[5])<<8 | uint32(payload[6])<<16 | uint32(payload[7])<<24
-			lit := uint32(payload[8]) | uint32(payload[9])<<8 | uint32(payload[10])<<16 | uint32(payload[11])<<24
-			litStr := "Off"
-			if lit != 0 {
-				litStr = "On"
-			}
-			return fmt.Sprintf("  Glow %d: Status=%s, Time=%d ms\n", glow, litStr, timestamp)
+		// 0 => glow, 1 => timestamp, 2 => lit (bool)
+		glow, _ := GetMapUint(m, 0)
+		timestamp, _ := GetMapUint(m, 1)
+		lit, _ := GetMapBool(m, 2)
+		litStr := "Off"
+		if lit {
+			litStr = "On"
 		}
+		return fmt.Sprintf("  Glow %d: Status=%s, Time=%d ms\n", glow, litStr, timestamp)
 
 	case MsgTempData:
-		if len(payload) >= 32 {
-			therm := int32(uint32(payload[0]) | uint32(payload[1])<<8 | uint32(payload[2])<<16 | uint32(payload[3])<<24)
-			timestamp := uint32(payload[4]) | uint32(payload[5])<<8 | uint32(payload[6])<<16 | uint32(payload[7])<<24
-			tempBits := uint64(payload[8]) | uint64(payload[9])<<8 | uint64(payload[10])<<16 | uint64(payload[11])<<24 |
-				uint64(payload[12])<<32 | uint64(payload[13])<<40 | uint64(payload[14])<<48 | uint64(payload[15])<<56
-			temp := Float64frombits(tempBits)
-			rpmCtrl := uint32(payload[16]) | uint32(payload[17])<<8 | uint32(payload[18])<<16 | uint32(payload[19])<<24
-			watchedMotor := int32(uint32(payload[20]) | uint32(payload[21])<<8 | uint32(payload[22])<<16 | uint32(payload[23])<<24)
-			targetBits := uint64(payload[24]) | uint64(payload[25])<<8 | uint64(payload[26])<<16 | uint64(payload[27])<<24 |
-				uint64(payload[28])<<32 | uint64(payload[29])<<40 | uint64(payload[30])<<48 | uint64(payload[31])<<56
-			targetTemp := Float64frombits(targetBits)
+		// 0 => thermometer, 1 => timestamp, 2 => reading (float)
+		// 3 => temperature-rpm-control (opt, bool), 4 => watched-motor (opt), 5 => target-temperature (opt)
+		therm, _ := GetMapUint(m, 0)
+		timestamp, _ := GetMapUint(m, 1)
+		temp, _ := GetMapFloat(m, 2)
+		rpmCtrl, hasRpmCtrl := GetMapBool(m, 3)
+		watchedMotor, hasMotor := GetMapInt(m, 4)
+		targetTemp, hasTarget := GetMapFloat(m, 5)
+
+		result := fmt.Sprintf("  Thermometer %d: %.1f°C", therm, temp)
+		if hasTarget {
+			result += fmt.Sprintf(" (target=%.1f°C)", targetTemp)
+		}
+		if hasRpmCtrl {
 			rpmStr := "Off"
-			if rpmCtrl != 0 {
+			if rpmCtrl {
 				rpmStr = "On"
 			}
-			return fmt.Sprintf("  Thermometer %d: %.1f°C (target=%.1f°C), RPM_Ctrl=%s, Motor=%d, Time=%d ms\n",
-				therm, temp, targetTemp, rpmStr, watchedMotor, timestamp)
+			result += fmt.Sprintf(", RPM_Ctrl=%s", rpmStr)
 		}
+		if hasMotor {
+			result += fmt.Sprintf(", Motor=%d", watchedMotor)
+		}
+		result += fmt.Sprintf(", Time=%d ms\n", timestamp)
+		return result
 
 	case MsgDeviceAnnounce:
-		if len(payload) >= 4 {
-			// Per spec: counts are u8 (1 byte each), followed by 4 bytes padding
-			motorCount := payload[0]
-			tempCount := payload[1]
-			pumpCount := payload[2]
-			glowCount := payload[3]
-			return fmt.Sprintf("  Motors: %d, Temperatures: %d, Pumps: %d, Glow Plugs: %d\n",
-				motorCount, tempCount, pumpCount, glowCount)
-		}
+		// 0 => motor-count, 1 => thermometer-count, 2 => pump-count, 3 => glow-count
+		motorCount, _ := GetMapUint(m, 0)
+		tempCount, _ := GetMapUint(m, 1)
+		pumpCount, _ := GetMapUint(m, 2)
+		glowCount, _ := GetMapUint(m, 3)
+		return fmt.Sprintf("  Motors: %d, Temperatures: %d, Pumps: %d, Glow Plugs: %d\n",
+			motorCount, tempCount, pumpCount, glowCount)
 
 	case MsgErrorInvalidCmd:
-		if len(payload) >= 4 {
-			code := int32(uint32(payload[0]) | uint32(payload[1])<<8 | uint32(payload[2])<<16 | uint32(payload[3])<<24)
-			codeStr := "Unknown"
-			switch code {
-			case 1:
-				codeStr = "Invalid parameter value"
-			case 2:
-				codeStr = "Invalid device index"
-			}
-			return fmt.Sprintf("  Error Code: %d (%s)\n", code, codeStr)
+		// 0 => error-code
+		code, _ := GetMapInt(m, 0)
+		codeStr := "Unknown"
+		switch code {
+		case 1:
+			codeStr = "Invalid parameter value"
+		case 2:
+			codeStr = "Invalid device index"
 		}
+		return fmt.Sprintf("  Error Code: %d (%s)\n", code, codeStr)
 
 	case MsgErrorStateReject:
-		if len(payload) >= 4 {
-			state := uint32(payload[0]) | uint32(payload[1])<<8 | uint32(payload[2])<<16 | uint32(payload[3])<<24
-			stateName := formatState(state)
-			return fmt.Sprintf("  Rejected by state: %s (%d)\n", stateName, state)
-		}
+		// 0 => error-code (state that rejected)
+		state, _ := GetMapUint(m, 0)
+		stateName := formatState(uint32(state))
+		return fmt.Sprintf("  Rejected by state: %s (%d)\n", stateName, state)
 
 	case MsgDataSubscription, MsgDataUnsubscribe:
-		if len(payload) >= 8 {
-			addr := uint64(payload[0]) | uint64(payload[1])<<8 | uint64(payload[2])<<16 | uint64(payload[3])<<24 |
-				uint64(payload[4])<<32 | uint64(payload[5])<<40 | uint64(payload[6])<<48 | uint64(payload[7])<<56
-			return fmt.Sprintf("  Appliance Address: 0x%016X\n", addr)
-		}
+		// 0 => appliance-address
+		addr, _ := GetMapUint(m, 0)
+		return fmt.Sprintf("  Appliance Address: 0x%016X\n", addr)
 
 	case MsgMotorConfig:
-		if len(payload) >= 44 {
-			motor := int32(uint32(payload[0]) | uint32(payload[1])<<8 | uint32(payload[2])<<16 | uint32(payload[3])<<24)
-			pwmPeriod := int32(uint32(payload[4]) | uint32(payload[5])<<8 | uint32(payload[6])<<16 | uint32(payload[7])<<24)
-			kpBits := uint64(payload[8]) | uint64(payload[9])<<8 | uint64(payload[10])<<16 | uint64(payload[11])<<24 |
-				uint64(payload[12])<<32 | uint64(payload[13])<<40 | uint64(payload[14])<<48 | uint64(payload[15])<<56
-			kp := Float64frombits(kpBits)
-			kiBits := uint64(payload[16]) | uint64(payload[17])<<8 | uint64(payload[18])<<16 | uint64(payload[19])<<24 |
-				uint64(payload[20])<<32 | uint64(payload[21])<<40 | uint64(payload[22])<<48 | uint64(payload[23])<<56
-			ki := Float64frombits(kiBits)
-			kdBits := uint64(payload[24]) | uint64(payload[25])<<8 | uint64(payload[26])<<16 | uint64(payload[27])<<24 |
-				uint64(payload[28])<<32 | uint64(payload[29])<<40 | uint64(payload[30])<<48 | uint64(payload[31])<<56
-			kd := Float64frombits(kdBits)
-			maxRPM := int32(uint32(payload[32]) | uint32(payload[33])<<8 | uint32(payload[34])<<16 | uint32(payload[35])<<24)
-			minRPM := int32(uint32(payload[36]) | uint32(payload[37])<<8 | uint32(payload[38])<<16 | uint32(payload[39])<<24)
-			minPWM := int32(uint32(payload[40]) | uint32(payload[41])<<8 | uint32(payload[42])<<16 | uint32(payload[43])<<24)
-			return fmt.Sprintf("  Motor %d: PWM=%d µs, PID=[%.2f,%.2f,%.2f], RPM=[%d-%d], MinPWM=%d µs\n",
-				motor, pwmPeriod, kp, ki, kd, minRPM, maxRPM, minPWM)
+		// 0 => motor, 1 => pwm-period (opt), 2-4 => PID (opt), 5-6 => RPM limits (opt), 7 => min-pwm (opt)
+		motor, _ := GetMapUint(m, 0)
+		result := fmt.Sprintf("  Motor %d:", motor)
+
+		if pwm, ok := GetMapUint(m, 1); ok {
+			result += fmt.Sprintf(" PWM=%d ns", pwm)
 		}
+		if kp, ok := GetMapFloat(m, 2); ok {
+			ki, _ := GetMapFloat(m, 3)
+			kd, _ := GetMapFloat(m, 4)
+			result += fmt.Sprintf(", PID=[%.2f,%.2f,%.2f]", kp, ki, kd)
+		}
+		if maxRPM, ok := GetMapInt(m, 5); ok {
+			minRPM, _ := GetMapInt(m, 6)
+			result += fmt.Sprintf(", RPM=[%d-%d]", minRPM, maxRPM)
+		}
+		if minPWM, ok := GetMapUint(m, 7); ok {
+			result += fmt.Sprintf(", MinPWM=%d ns", minPWM)
+		}
+		return result + "\n"
 
 	case MsgPumpConfig:
-		if len(payload) >= 12 {
-			pump := int32(uint32(payload[0]) | uint32(payload[1])<<8 | uint32(payload[2])<<16 | uint32(payload[3])<<24)
-			pulse := int32(uint32(payload[4]) | uint32(payload[5])<<8 | uint32(payload[6])<<16 | uint32(payload[7])<<24)
-			recovery := int32(uint32(payload[8]) | uint32(payload[9])<<8 | uint32(payload[10])<<16 | uint32(payload[11])<<24)
-			return fmt.Sprintf("  Pump %d: Pulse=%d ms, Recovery=%d ms\n", pump, pulse, recovery)
+		// 0 => pump, 1 => pulse-ms (opt), 2 => recovery-ms (opt)
+		pump, _ := GetMapUint(m, 0)
+		result := fmt.Sprintf("  Pump %d:", pump)
+		if pulse, ok := GetMapUint(m, 1); ok {
+			result += fmt.Sprintf(" Pulse=%d ms", pulse)
 		}
+		if recovery, ok := GetMapUint(m, 2); ok {
+			result += fmt.Sprintf(", Recovery=%d ms", recovery)
+		}
+		return result + "\n"
 
 	case MsgTempConfig:
-		if len(payload) >= 36 {
-			therm := int32(uint32(payload[0]) | uint32(payload[1])<<8 | uint32(payload[2])<<16 | uint32(payload[3])<<24)
-			kpBits := uint64(payload[4]) | uint64(payload[5])<<8 | uint64(payload[6])<<16 | uint64(payload[7])<<24 |
-				uint64(payload[8])<<32 | uint64(payload[9])<<40 | uint64(payload[10])<<48 | uint64(payload[11])<<56
-			kp := Float64frombits(kpBits)
-			kiBits := uint64(payload[12]) | uint64(payload[13])<<8 | uint64(payload[14])<<16 | uint64(payload[15])<<24 |
-				uint64(payload[16])<<32 | uint64(payload[17])<<40 | uint64(payload[18])<<48 | uint64(payload[19])<<56
-			ki := Float64frombits(kiBits)
-			kdBits := uint64(payload[20]) | uint64(payload[21])<<8 | uint64(payload[22])<<16 | uint64(payload[23])<<24 |
-				uint64(payload[24])<<32 | uint64(payload[25])<<40 | uint64(payload[26])<<48 | uint64(payload[27])<<56
-			kd := Float64frombits(kdBits)
-			sampleCount := int32(uint32(payload[28]) | uint32(payload[29])<<8 | uint32(payload[30])<<16 | uint32(payload[31])<<24)
-			readRate := int32(uint32(payload[32]) | uint32(payload[33])<<8 | uint32(payload[34])<<16 | uint32(payload[35])<<24)
-			return fmt.Sprintf("  Thermometer %d: PID=[%.2f,%.2f,%.2f], Samples=%d, ReadRate=%d ms\n",
-				therm, kp, ki, kd, sampleCount, readRate)
+		// 0 => thermometer, 1-3 => PID (opt)
+		therm, _ := GetMapUint(m, 0)
+		result := fmt.Sprintf("  Thermometer %d:", therm)
+		if kp, ok := GetMapFloat(m, 1); ok {
+			ki, _ := GetMapFloat(m, 2)
+			kd, _ := GetMapFloat(m, 3)
+			result += fmt.Sprintf(" PID=[%.2f,%.2f,%.2f]", kp, ki, kd)
 		}
+		return result + "\n"
 
 	case MsgGlowConfig:
-		if len(payload) >= 8 {
-			glow := int32(uint32(payload[0]) | uint32(payload[1])<<8 | uint32(payload[2])<<16 | uint32(payload[3])<<24)
-			maxDur := int32(uint32(payload[4]) | uint32(payload[5])<<8 | uint32(payload[6])<<16 | uint32(payload[7])<<24)
-			return fmt.Sprintf("  Glow %d: MaxDuration=%d ms\n", glow, maxDur)
+		// 0 => glow, 1 => max-duration (opt)
+		glow, _ := GetMapUint(m, 0)
+		result := fmt.Sprintf("  Glow %d:", glow)
+		if maxDur, ok := GetMapUint(m, 1); ok {
+			result += fmt.Sprintf(" MaxDuration=%d ms", maxDur)
 		}
+		return result + "\n"
 	}
 
-	// Default: hex dump
-	result := "  Payload: "
-	for i, b := range payload {
-		if i > 0 && i%16 == 0 {
-			result += "\n           "
-		}
-		result += fmt.Sprintf("%02X ", b)
+	// Default: show map contents
+	if m == nil {
+		return "  (nil payload)\n"
 	}
-	return result + "\n"
+	result := "  Payload: {"
+	for k, v := range m {
+		result += fmt.Sprintf("%d: %v, ", k, v)
+	}
+	return result + "}\n"
 }
 
 // formatState returns a human-readable state name

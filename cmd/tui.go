@@ -5,7 +5,6 @@ package cmd
 
 import (
 	"fmt"
-	"math"
 	"strings"
 	"time"
 
@@ -13,11 +12,6 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
-
-// float64frombits converts uint64 bits to float64
-func float64frombits(b uint64) float64 {
-	return math.Float64frombits(b)
-}
 
 // Error log entry
 type errorLogEntry struct {
@@ -29,13 +23,13 @@ type errorLogEntry struct {
 // Telemetry data
 type telemetryData struct {
 	timestamp    time.Time
-	state        uint32
+	state        uint64
 	stateName    string
-	errorCode    uint8
+	errorCode    int64
 	motorCount   uint8
 	tempCount    uint8
-	motorRPM     []int32
-	motorTarget  []int32
+	motorRPM     []int64
+	motorTarget  []int64
 	temperatures []float64
 	uptime       uint64 // milliseconds
 	hasUptime    bool
@@ -218,7 +212,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				for _, err := range msg.validationErrors {
 					m.addLogEntry(fmt.Sprintf("%s: %s", msgType, err.Message), true)
 				}
-			} else if msg.packet.Type() == fusain.MSG_PING_RESPONSE {
+			} else if msg.packet.Type() == fusain.MsgPingResponse {
 				// Ping responses update telemetry silently (no log entry)
 				// The uptime will appear in the "Latest Telemetry" box
 			} else if m.showAll {
@@ -246,22 +240,20 @@ func (m *model) addLogEntry(message string, isError bool) {
 	}
 }
 
-// parseTelemetry extracts telemetry data from packets
+// parseTelemetry extracts telemetry data from packets using CBOR payload maps
 func (m *model) parseTelemetry(packet *fusain.Packet) {
-	payload := packet.Payload()
+	payloadMap := packet.PayloadMap()
 	stateNames := []string{"INITIALIZING", "IDLE", "BLOWING", "PREHEAT", "PREHEAT_STAGE_2", "HEATING", "COOLING", "ERROR", "E_STOP"}
 
 	switch packet.Type() {
-	case fusain.MSG_STATE_DATA:
-		if len(payload) < 16 {
+	case fusain.MsgStateData:
+		// CBOR keys: 0=error(bool), 1=code, 2=state, 3=timestamp
+		state, hasState := fusain.GetMapUint(payloadMap, 2)
+		if !hasState {
 			return
 		}
 
-		// STATE_DATA payload per spec: error(4) + code(4) + state(4) + timestamp(4)
-		// code is the error code (bytes 4-7)
-		errorCode := uint8(payload[4]) // Just first byte for error code display
-		state := uint32(payload[8]) | uint32(payload[9])<<8 |
-			uint32(payload[10])<<16 | uint32(payload[11])<<24
+		errorCode, _ := fusain.GetMapInt(payloadMap, 1)
 
 		stateName := "UNKNOWN"
 		if int(state) < len(stateNames) {
@@ -285,14 +277,12 @@ func (m *model) parseTelemetry(packet *fusain.Packet) {
 			hasUptime: hasUptime,
 		}
 
-	case fusain.MSG_PING_RESPONSE:
-		if len(payload) < 4 {
+	case fusain.MsgPingResponse:
+		// CBOR keys: 0=uptime
+		uptime, ok := fusain.GetMapUint(payloadMap, 0)
+		if !ok {
 			return
 		}
-
-		// Extract uptime from ping response (4 bytes, little-endian per spec)
-		uptime := uint64(payload[0]) | uint64(payload[1])<<8 |
-			uint64(payload[2])<<16 | uint64(payload[3])<<24
 
 		// Update or create telemetry with uptime
 		if m.lastTelemetry != nil {
@@ -306,18 +296,15 @@ func (m *model) parseTelemetry(packet *fusain.Packet) {
 			}
 		}
 
-	case fusain.MSG_MOTOR_DATA:
-		if len(payload) < 32 {
+	case fusain.MsgMotorData:
+		// CBOR keys: 0=motor, 1=timestamp, 2=rpm, 3=target, 4=max-rpm, 5=min-rpm, 6=pwm, 7=pwm-max
+		motorIdx, ok := fusain.GetMapInt(payloadMap, 0)
+		if !ok || motorIdx < 0 {
 			return
 		}
 
-		// MOTOR_DATA: motor(4) + timestamp(4) + rpm(4) + target(4) + max_rpm(4) + min_rpm(4) + pwm(4) + pwm_max(4)
-		motorIdx := int32(payload[0]) | int32(payload[1])<<8 |
-			int32(payload[2])<<16 | int32(payload[3])<<24
-		rpm := int32(payload[8]) | int32(payload[9])<<8 |
-			int32(payload[10])<<16 | int32(payload[11])<<24
-		target := int32(payload[12]) | int32(payload[13])<<8 |
-			int32(payload[14])<<16 | int32(payload[15])<<24
+		rpm, _ := fusain.GetMapInt(payloadMap, 2)
+		target, _ := fusain.GetMapInt(payloadMap, 3)
 
 		// Ensure we have storage for this motor
 		if m.lastTelemetry == nil {
@@ -335,21 +322,14 @@ func (m *model) parseTelemetry(packet *fusain.Packet) {
 		m.lastTelemetry.motorRPM[motorIdx] = rpm
 		m.lastTelemetry.motorTarget[motorIdx] = target
 
-	case fusain.MSG_TEMP_DATA:
-		if len(payload) < 32 {
+	case fusain.MsgTempData:
+		// CBOR keys: 0=thermometer, 1=timestamp, 2=reading, 3=temperature-rpm-control, 4=watched-motor, 5=target-temperature
+		tempIdx, ok := fusain.GetMapInt(payloadMap, 0)
+		if !ok || tempIdx < 0 {
 			return
 		}
 
-		// TEMP_DATA: temperature(4) + timestamp(4) + reading(8) + rpm_control(4) + watched_motor(4) + target_temp(8)
-		tempIdx := int32(payload[0]) | int32(payload[1])<<8 |
-			int32(payload[2])<<16 | int32(payload[3])<<24
-
-		// Extract float64 reading (bytes 8-15, little-endian)
-		readingBits := uint64(payload[8]) | uint64(payload[9])<<8 |
-			uint64(payload[10])<<16 | uint64(payload[11])<<24 |
-			uint64(payload[12])<<32 | uint64(payload[13])<<40 |
-			uint64(payload[14])<<48 | uint64(payload[15])<<56
-		reading := float64frombits(readingBits)
+		reading, _ := fusain.GetMapFloat(payloadMap, 2)
 
 		// Ensure we have storage for this temperature
 		if m.lastTelemetry == nil {
@@ -511,7 +491,7 @@ func (m model) View() string {
 		// Motors
 		if len(m.lastTelemetry.motorRPM) > 0 {
 			for i, rpm := range m.lastTelemetry.motorRPM {
-				target := int32(0)
+				target := int64(0)
 				if i < len(m.lastTelemetry.motorTarget) {
 					target = m.lastTelemetry.motorTarget[i]
 				}

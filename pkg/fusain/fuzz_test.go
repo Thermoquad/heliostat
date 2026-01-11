@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"testing"
 	"time"
+
+	"github.com/fxamacker/cbor/v2"
 )
 
 // getFuzzRounds returns the number of fuzz rounds from FUZZ_ROUNDS env var, default 1000
@@ -38,6 +40,40 @@ func newFuzzRng(t *testing.T) *rand.Rand {
 	return rand.New(rand.NewSource(seed))
 }
 
+// buildRandomCBORPayload creates a CBOR payload [msgType, random_map] for fuzz testing
+func buildRandomCBORPayload(rng *rand.Rand, msgType uint8) []byte {
+	// Build random payload map with 0-5 entries
+	numEntries := rng.Intn(6)
+	payloadMap := make(map[int]interface{})
+	for i := 0; i < numEntries; i++ {
+		key := rng.Intn(10)
+		switch rng.Intn(4) {
+		case 0:
+			payloadMap[key] = uint64(rng.Uint64())
+		case 1:
+			payloadMap[key] = int64(rng.Int63())
+		case 2:
+			payloadMap[key] = rng.Float64()
+		case 3:
+			payloadMap[key] = rng.Intn(2) == 1
+		}
+	}
+
+	var msg interface{}
+	if len(payloadMap) == 0 {
+		msg = []interface{}{uint64(msgType), nil}
+	} else {
+		msg = []interface{}{uint64(msgType), payloadMap}
+	}
+
+	data, err := cbor.Marshal(msg)
+	if err != nil {
+		// Fallback to empty payload
+		data, _ = cbor.Marshal([]interface{}{uint64(msgType), nil})
+	}
+	return data
+}
+
 // ============================================================
 // Decoder Fuzz Tests
 // ============================================================
@@ -65,7 +101,7 @@ func TestFuzzDecoder_RandomBytes(t *testing.T) {
 }
 
 // TestFuzzDecoder_RandomPackets generates random valid-looking packets
-// with random payloads
+// with random CBOR payloads
 func TestFuzzDecoder_RandomPackets(t *testing.T) {
 	rounds := getFuzzRounds()
 	rng := newFuzzRng(t)
@@ -74,30 +110,26 @@ func TestFuzzDecoder_RandomPackets(t *testing.T) {
 	for i := 0; i < rounds; i++ {
 		d := NewDecoder()
 
-		// Generate random packet
+		// Generate random packet with CBOR payload
 		address := rng.Uint64()
 		msgType := uint8(rng.Intn(256))
-		payloadLen := rng.Intn(int(MaxPayloadSize) + 1)
-		payload := make([]byte, payloadLen)
-		rng.Read(payload)
+		cborPayload := buildRandomCBORPayload(rng, msgType)
 
-		// Build CRC data
-		crcData := []byte{uint8(payloadLen)}
+		// Build CRC data: [length, address(8), cborPayload]
+		crcData := []byte{uint8(len(cborPayload))}
 		for j := 0; j < 8; j++ {
 			crcData = append(crcData, byte(address>>(j*8)))
 		}
-		crcData = append(crcData, msgType)
-		crcData = append(crcData, payload...)
+		crcData = append(crcData, cborPayload...)
 		crc := CalculateCRC(crcData)
 
 		// Feed packet with byte stuffing
 		d.DecodeByte(StartByte)
-		feedByteWithStuffing(d, uint8(payloadLen))
+		feedByteWithStuffing(d, uint8(len(cborPayload)))
 		for j := 0; j < 8; j++ {
 			feedByteWithStuffing(d, byte(address>>(j*8)))
 		}
-		feedByteWithStuffing(d, msgType)
-		for _, b := range payload {
+		for _, b := range cborPayload {
 			feedByteWithStuffing(d, b)
 		}
 		feedByteWithStuffing(d, byte(crc>>8))
@@ -115,12 +147,13 @@ func TestFuzzDecoder_RandomPackets(t *testing.T) {
 		}
 
 		// Verify packet fields
-		if packet.Length() != uint8(payloadLen) {
-			t.Errorf("Round %d: length mismatch: expected %d, got %d", i, payloadLen, packet.Length())
+		if packet.Length() != uint8(len(cborPayload)) {
+			t.Errorf("Round %d: length mismatch: expected %d, got %d", i, len(cborPayload), packet.Length())
 		}
 		if packet.Address() != address {
 			t.Errorf("Round %d: address mismatch: expected 0x%016X, got 0x%016X", i, address, packet.Address())
 		}
+		// Type is now parsed from CBOR, should match what we encoded
 		if packet.Type() != msgType {
 			t.Errorf("Round %d: type mismatch: expected 0x%02X, got 0x%02X", i, msgType, packet.Type())
 		}
@@ -139,17 +172,14 @@ func TestFuzzDecoder_CorruptedPackets(t *testing.T) {
 		// Generate a valid packet first
 		address := rng.Uint64()
 		msgType := uint8(rng.Intn(256))
-		payloadLen := rng.Intn(50) + 1 // Smaller for speed
-		payload := make([]byte, payloadLen)
-		rng.Read(payload)
+		cborPayload := buildRandomCBORPayload(rng, msgType)
 
 		// Build packet bytes (without byte stuffing for simplicity)
-		packetBytes := []byte{StartByte, uint8(payloadLen)}
+		packetBytes := []byte{StartByte, uint8(len(cborPayload))}
 		for j := 0; j < 8; j++ {
 			packetBytes = append(packetBytes, byte(address>>(j*8)))
 		}
-		packetBytes = append(packetBytes, msgType)
-		packetBytes = append(packetBytes, payload...)
+		packetBytes = append(packetBytes, cborPayload...)
 
 		// Calculate correct CRC
 		crcData := packetBytes[1:] // Skip StartByte
@@ -182,16 +212,13 @@ func TestFuzzDecoder_MissingBytes(t *testing.T) {
 		// Build valid packet bytes
 		address := rng.Uint64()
 		msgType := uint8(rng.Intn(256))
-		payloadLen := rng.Intn(20) + 1
-		payload := make([]byte, payloadLen)
-		rng.Read(payload)
+		cborPayload := buildRandomCBORPayload(rng, msgType)
 
-		packetBytes := []byte{StartByte, uint8(payloadLen)}
+		packetBytes := []byte{StartByte, uint8(len(cborPayload))}
 		for j := 0; j < 8; j++ {
 			packetBytes = append(packetBytes, byte(address>>(j*8)))
 		}
-		packetBytes = append(packetBytes, msgType)
-		packetBytes = append(packetBytes, payload...)
+		packetBytes = append(packetBytes, cborPayload...)
 
 		crcData := packetBytes[1:]
 		crc := CalculateCRC(crcData)
@@ -224,16 +251,13 @@ func TestFuzzDecoder_ExtraBytes(t *testing.T) {
 		// Build valid packet bytes
 		address := rng.Uint64()
 		msgType := uint8(rng.Intn(256))
-		payloadLen := rng.Intn(20) + 1
-		payload := make([]byte, payloadLen)
-		rng.Read(payload)
+		cborPayload := buildRandomCBORPayload(rng, msgType)
 
-		packetBytes := []byte{StartByte, uint8(payloadLen)}
+		packetBytes := []byte{StartByte, uint8(len(cborPayload))}
 		for j := 0; j < 8; j++ {
 			packetBytes = append(packetBytes, byte(address>>(j*8)))
 		}
-		packetBytes = append(packetBytes, msgType)
-		packetBytes = append(packetBytes, payload...)
+		packetBytes = append(packetBytes, cborPayload...)
 
 		crcData := packetBytes[1:]
 		crc := CalculateCRC(crcData)
@@ -270,23 +294,27 @@ func TestFuzzDecoder_RepeatedStart(t *testing.T) {
 			d.DecodeByte(StartByte)
 		}
 
-		// Now send a valid packet
+		// Now send a valid packet (PING_REQUEST with empty payload)
 		address := uint64(0x0102030405060708)
-		msgType := uint8(MsgPingRequest)
-		length := uint8(0)
+
+		// Build CBOR payload: [MsgPingRequest, nil]
+		cborPayload, _ := cbor.Marshal([]interface{}{uint64(MsgPingRequest), nil})
+		length := uint8(len(cborPayload))
 
 		crcData := []byte{length}
 		for j := 0; j < 8; j++ {
 			crcData = append(crcData, byte(address>>(j*8)))
 		}
-		crcData = append(crcData, msgType)
+		crcData = append(crcData, cborPayload...)
 		crc := CalculateCRC(crcData)
 
 		d.DecodeByte(length)
 		for j := 0; j < 8; j++ {
 			d.DecodeByte(byte(address >> (j * 8)))
 		}
-		d.DecodeByte(msgType)
+		for _, b := range cborPayload {
+			d.DecodeByte(b)
+		}
 		d.DecodeByte(byte(crc >> 8))
 		d.DecodeByte(byte(crc))
 
@@ -363,14 +391,12 @@ func TestFuzzValidation_RandomPackets(t *testing.T) {
 
 	for i := 0; i < rounds; i++ {
 		for _, msgType := range msgTypes {
-			// Generate random payload
-			payloadLen := rng.Intn(int(MaxPayloadSize) + 1)
-			payload := make([]byte, payloadLen)
-			rng.Read(payload)
+			// Generate random CBOR payload
+			cborPayload := buildRandomCBORPayload(rng, msgType)
 
 			// Create packet
 			address := rng.Uint64()
-			p := NewPacket(uint8(payloadLen), address, msgType, payload, 0)
+			p := NewPacket(uint8(len(cborPayload)), address, cborPayload, 0)
 
 			// Validate - should not panic
 			errors := ValidatePacket(p)
@@ -389,21 +415,40 @@ func TestFuzzValidation_EdgeCases(t *testing.T) {
 	rng := newFuzzRng(t)
 	t.Logf("Running %d fuzz rounds", rounds)
 
-	edgeCaseValues := []byte{0x00, 0x01, 0x7E, 0x7F, 0x7D, 0xFE, 0xFF}
-
 	for i := 0; i < rounds; i++ {
-		// Create payload filled with edge case values
-		payloadLen := rng.Intn(100) + 1
-		payload := make([]byte, payloadLen)
-		for j := range payload {
-			payload[j] = edgeCaseValues[rng.Intn(len(edgeCaseValues))]
-		}
-
-		// Test with different message types
+		// Create random CBOR payload with edge case values in the map
 		msgTypes := []uint8{MsgStateData, MsgMotorData, MsgTempData}
 		msgType := msgTypes[rng.Intn(len(msgTypes))]
 
-		p := NewPacket(uint8(payloadLen), 0x123456789ABCDEF0, msgType, payload, 0)
+		// Build edge case map
+		edgeValues := []interface{}{
+			uint64(0),
+			uint64(0xFFFFFFFFFFFFFFFF),
+			int64(-1),
+			int64(-0x8000000000000000),
+			float64(0),
+			float64(-1e308),
+			float64(1e308),
+			true,
+			false,
+		}
+
+		payloadMap := make(map[int]interface{})
+		numEntries := rng.Intn(6)
+		for j := 0; j < numEntries; j++ {
+			key := rng.Intn(10)
+			payloadMap[key] = edgeValues[rng.Intn(len(edgeValues))]
+		}
+
+		var msg interface{}
+		if len(payloadMap) == 0 {
+			msg = []interface{}{uint64(msgType), nil}
+		} else {
+			msg = []interface{}{uint64(msgType), payloadMap}
+		}
+
+		cborPayload, _ := cbor.Marshal(msg)
+		p := NewPacket(uint8(len(cborPayload)), 0x123456789ABCDEF0, cborPayload, 0)
 
 		// Validate - should not panic
 		ValidatePacket(p)
@@ -421,14 +466,12 @@ func TestFuzzFormatter_RandomPackets(t *testing.T) {
 	t.Logf("Running %d fuzz rounds", rounds)
 
 	for i := 0; i < rounds; i++ {
-		// Generate random packet
+		// Generate random packet with CBOR payload
 		msgType := uint8(rng.Intn(256))
-		payloadLen := rng.Intn(int(MaxPayloadSize) + 1)
-		payload := make([]byte, payloadLen)
-		rng.Read(payload)
+		cborPayload := buildRandomCBORPayload(rng, msgType)
 
 		address := rng.Uint64()
-		p := NewPacket(uint8(payloadLen), address, msgType, payload, 0)
+		p := NewPacket(uint8(len(cborPayload)), address, cborPayload, 0)
 
 		// Format - should not panic
 		result := FormatPacket(p)
@@ -442,10 +485,11 @@ func TestFuzzFormatter_RandomPackets(t *testing.T) {
 			t.Errorf("Round %d: FormatMessageType returned empty string", i)
 		}
 
-		// FormatPayload - should not panic
-		payloadStr := FormatPayload(msgType, payload)
+		// FormatPayloadMap - should not panic
+		payloadMap := p.PayloadMap()
+		payloadStr := FormatPayloadMap(msgType, payloadMap)
 		if payloadStr == "" {
-			t.Errorf("Round %d: FormatPayload returned empty string", i)
+			t.Errorf("Round %d: FormatPayloadMap returned empty string", i)
 		}
 	}
 }

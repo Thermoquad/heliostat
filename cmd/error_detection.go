@@ -76,16 +76,14 @@ func printDecodeError(err error) {
 // printPingResponse prints a ping response with uptime
 func printPingResponse(packet *fusain.Packet) {
 	timestamp := packet.Timestamp().Format("15:04:05.000")
-	payload := packet.Payload()
+	payloadMap := packet.PayloadMap()
 
-	// Extract uptime (4 bytes, little-endian per spec)
-	if len(payload) < 4 {
-		fmt.Printf("[%s] \033[1;32mPING_RESPONSE:\033[0m Invalid payload length (%d bytes)\n\n", timestamp, len(payload))
+	// Extract uptime (CBOR key 0)
+	uptime, ok := fusain.GetMapUint(payloadMap, 0)
+	if !ok {
+		fmt.Printf("[%s] \033[1;32mPING_RESPONSE:\033[0m No uptime in payload\n\n", timestamp)
 		return
 	}
-
-	uptime := uint64(payload[0]) | uint64(payload[1])<<8 |
-		uint64(payload[2])<<16 | uint64(payload[3])<<24
 
 	uptimeStr := formatUptime(uptime)
 	fmt.Printf("[%s] \033[1;32mPING_RESPONSE:\033[0m Helios uptime: %s\n\n", timestamp, uptimeStr)
@@ -101,44 +99,45 @@ func printValidationErrors(packet *fusain.Packet, errors []fusain.ValidationErro
 
 	for i, err := range errors {
 		switch err.Type {
-		case fusain.ANOMALY_INVALID_COUNT:
+		case fusain.AnomalyInvalidCount:
 			fmt.Printf("  Issue %d: \033[1;31m%s\033[0m\n", i+1, err.Message)
-			if motorCount, ok := err.Details["motor_count"].(uint8); ok {
+			if motorCount, ok := err.Details["motor_count"].(uint64); ok {
 				fmt.Printf("    motor_count=%d (max 10)\n", motorCount)
 			}
-			if tempCount, ok := err.Details["temp_count"].(uint8); ok {
+			if tempCount, ok := err.Details["temp_count"].(uint64); ok {
 				fmt.Printf("    temp_count=%d (max 10)\n", tempCount)
 			}
 
-		case fusain.ANOMALY_LENGTH_MISMATCH:
+		case fusain.AnomalyLengthMismatch:
 			fmt.Printf("  Issue %d: \033[1;31m%s\033[0m\n", i+1, err.Message)
-			if received, ok := err.Details["received"].(int); ok {
-				if expected, ok := err.Details["expected"].(int); ok {
-					fmt.Printf("    Length: received=%d, expected=%d\n", received, expected)
-				}
-			}
 
-		case fusain.ANOMALY_HIGH_RPM:
+		case fusain.AnomalyHighRPM:
 			fmt.Printf("  Issue %d: \033[1;33m%s\033[0m\n", i+1, err.Message)
-			if rpm, ok := err.Details["rpm"].(int32); ok {
-				if targetRPM, ok := err.Details["target_rpm"].(int32); ok {
+			if rpm, ok := err.Details["rpm"].(int64); ok {
+				if targetRPM, ok := err.Details["target_rpm"].(int64); ok {
 					fmt.Printf("    RPM=%d, target=%d (max 6000)\n", rpm, targetRPM)
 				}
 			}
 
-		case fusain.ANOMALY_INVALID_TEMP:
+		case fusain.AnomalyInvalidTemp:
 			fmt.Printf("  Issue %d: \033[1;33m%s\033[0m\n", i+1, err.Message)
 			if temp, ok := err.Details["value"].(float64); ok {
 				fmt.Printf("    Temperature=%.1f°C (valid: -50 to 1000°C)\n", temp)
 			}
 
-		case fusain.ANOMALY_INVALID_PWM:
+		case fusain.AnomalyInvalidPWM:
 			fmt.Printf("  Issue %d: \033[1;33m%s\033[0m\n", i+1, err.Message)
-			if duty, ok := err.Details["pwm_duty"].(int32); ok {
-				if period, ok := err.Details["pwm_period"].(int32); ok {
-					fmt.Printf("    PWM: duty=%d, period=%d\n", duty, period)
+			if pwm, ok := err.Details["pwm"].(uint64); ok {
+				if pwmMax, ok := err.Details["pwm_max"].(uint64); ok {
+					fmt.Printf("    PWM: duty=%d, max=%d\n", pwm, pwmMax)
 				}
 			}
+
+		case fusain.AnomalyDecodeError:
+			fmt.Printf("  Issue %d: \033[1;31m%s\033[0m\n", i+1, err.Message)
+
+		case fusain.AnomalyInvalidValue:
+			fmt.Printf("  Issue %d: \033[1;33m%s\033[0m\n", i+1, err.Message)
 
 		default:
 			fmt.Printf("  Issue %d: %s\n", i+1, err.Message)
@@ -147,17 +146,18 @@ func printValidationErrors(packet *fusain.Packet, errors []fusain.ValidationErro
 
 	// Print packet header for context (STATE_DATA contains state and error code)
 	stateNames := []string{"INITIALIZING", "IDLE", "BLOWING", "PREHEAT", "PREHEAT_STAGE_2", "HEATING", "COOLING", "ERROR", "E_STOP"}
-	if packet.Type() == fusain.MSG_STATE_DATA && len(packet.Payload()) >= 16 {
-		// STATE_DATA payload per spec: error(4) + code(4) + state(4) + timestamp(4)
-		state := uint32(packet.Payload()[8]) | uint32(packet.Payload()[9])<<8 |
-			uint32(packet.Payload()[10])<<16 | uint32(packet.Payload()[11])<<24
-		errorCode := uint32(packet.Payload()[4]) | uint32(packet.Payload()[5])<<8 |
-			uint32(packet.Payload()[6])<<16 | uint32(packet.Payload()[7])<<24
-		stateName := "UNKNOWN"
-		if int(state) < len(stateNames) {
-			stateName = stateNames[state]
+	if packet.Type() == fusain.MsgStateData {
+		payloadMap := packet.PayloadMap()
+		// CBOR keys: 0=error(bool), 1=code, 2=state, 3=timestamp
+		state, hasState := fusain.GetMapUint(payloadMap, 2)
+		errorCode, _ := fusain.GetMapInt(payloadMap, 1)
+		if hasState {
+			stateName := "UNKNOWN"
+			if int(state) < len(stateNames) {
+				stateName = stateNames[state]
+			}
+			fmt.Printf("  State: %s (0x%02X), Error: 0x%02X\n", stateName, state, errorCode)
 		}
-		fmt.Printf("  State: %s (0x%02X), Error: 0x%02X\n", stateName, state, errorCode)
 	}
 
 	fmt.Printf("  >>> PACKET REJECTED <<<\n\n")
@@ -303,7 +303,7 @@ func runTextMode(port serial.Port) error {
 					// Print packet or error based on mode
 					if len(validationErrors) > 0 {
 						printValidationErrors(packet, validationErrors)
-					} else if packet.Type() == fusain.MSG_PING_RESPONSE {
+					} else if packet.Type() == fusain.MsgPingResponse {
 						// Always print ping responses (for debugging)
 						printPingResponse(packet)
 					} else if showAll {

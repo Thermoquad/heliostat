@@ -36,77 +36,87 @@ func (v *ValidationError) Error() string {
 func ValidatePacket(p *Packet) []ValidationError {
 	errors := []ValidationError{}
 
-	switch p.msgType {
+	// Check for CBOR parse errors first
+	if err := p.ParseError(); err != nil {
+		return []ValidationError{{
+			Type:    AnomalyDecodeError,
+			Message: fmt.Sprintf("CBOR parse error: %v", err),
+			Details: map[string]interface{}{"error": err.Error()},
+		}}
+	}
+
+	msgType := p.Type()
+	payloadMap := p.PayloadMap()
+
+	switch msgType {
 	case MsgStateData:
-		errors = append(errors, validateStateData(p)...)
+		errors = append(errors, validateStateData(payloadMap)...)
 	case MsgMotorData:
-		errors = append(errors, validateMotorData(p)...)
+		errors = append(errors, validateMotorData(payloadMap)...)
 	case MsgTempData:
-		errors = append(errors, validateTemperatureData(p)...)
+		errors = append(errors, validateTemperatureData(payloadMap)...)
 	case MsgGlowCommand:
-		errors = append(errors, validateGlowCommand(p)...)
+		errors = append(errors, validateGlowCommand(payloadMap)...)
 	case MsgDeviceAnnounce:
-		errors = append(errors, validateDeviceAnnounce(p)...)
+		errors = append(errors, validateDeviceAnnounce(payloadMap, p.IsStateless())...)
 	}
 
 	return errors
 }
 
-// validateStateData validates STATE_DATA packet
-func validateStateData(p *Packet) []ValidationError {
+// validateStateData validates STATE_DATA payload
+// CBOR keys: 0=error(bool), 1=code, 2=state, 3=timestamp
+func validateStateData(m map[int]interface{}) []ValidationError {
 	errors := []ValidationError{}
 
-	if len(p.payload) < 16 {
+	if m == nil {
 		return []ValidationError{{
 			Type:    AnomalyLengthMismatch,
-			Message: "STATE_DATA payload too short (expected 16 bytes)",
-			Details: map[string]interface{}{"length": len(p.payload), "expected": 16},
+			Message: "STATE_DATA missing payload",
+			Details: map[string]interface{}{},
 		}}
 	}
 
-	// Extract state value
-	state := uint32(p.payload[8]) | uint32(p.payload[9])<<8 | uint32(p.payload[10])<<16 | uint32(p.payload[11])<<24
-	if state > uint32(SysStateEstop) {
+	// Validate state value (key 2)
+	state, ok := GetMapUint(m, 2)
+	if ok && state > uint64(SysStateEstop) {
 		errors = append(errors, ValidationError{
 			Type:    AnomalyInvalidValue,
-			Message: fmt.Sprintf("Invalid state value=%d (max %d)", state, uint32(SysStateEstop)),
-			Details: map[string]interface{}{"state": state, "max": uint32(SysStateEstop)},
+			Message: fmt.Sprintf("Invalid state value=%d (max %d)", state, uint64(SysStateEstop)),
+			Details: map[string]interface{}{"state": state, "max": uint64(SysStateEstop)},
 		})
 	}
 
-	// Extract error code
-	code := int32(uint32(p.payload[4]) | uint32(p.payload[5])<<8 | uint32(p.payload[6])<<16 | uint32(p.payload[7])<<24)
-	if code < 0 || code > int32(ErrorCommandedStop) {
+	// Validate error code (key 1)
+	code, ok := GetMapInt(m, 1)
+	if ok && (code < 0 || code > int64(ErrorCommandedStop)) {
 		errors = append(errors, ValidationError{
 			Type:    AnomalyInvalidValue,
-			Message: fmt.Sprintf("Invalid error code=%d (valid 0-%d)", code, int32(ErrorCommandedStop)),
-			Details: map[string]interface{}{"code": code, "max": int32(ErrorCommandedStop)},
+			Message: fmt.Sprintf("Invalid error code=%d (valid 0-%d)", code, int64(ErrorCommandedStop)),
+			Details: map[string]interface{}{"code": code, "max": int64(ErrorCommandedStop)},
 		})
 	}
 
 	return errors
 }
 
-// validateMotorData validates MOTOR_DATA packet
-func validateMotorData(p *Packet) []ValidationError {
+// validateMotorData validates MOTOR_DATA payload
+// CBOR keys: 0=motor, 1=timestamp, 2=rpm, 3=target, 4=max-rpm, 5=min-rpm, 6=pwm, 7=pwm-max
+func validateMotorData(m map[int]interface{}) []ValidationError {
 	errors := []ValidationError{}
 
-	if len(p.payload) < 32 {
+	if m == nil {
 		return []ValidationError{{
 			Type:    AnomalyLengthMismatch,
-			Message: "MOTOR_DATA payload too short (expected 32 bytes)",
-			Details: map[string]interface{}{"length": len(p.payload), "expected": 32},
+			Message: "MOTOR_DATA missing payload",
+			Details: map[string]interface{}{},
 		}}
 	}
 
-	rpm := int32(uint32(p.payload[8]) | uint32(p.payload[9])<<8 |
-		uint32(p.payload[10])<<16 | uint32(p.payload[11])<<24)
-	target := int32(uint32(p.payload[12]) | uint32(p.payload[13])<<8 |
-		uint32(p.payload[14])<<16 | uint32(p.payload[15])<<24)
-	pwm := int32(uint32(p.payload[24]) | uint32(p.payload[25])<<8 |
-		uint32(p.payload[26])<<16 | uint32(p.payload[27])<<24)
-	pwmMax := int32(uint32(p.payload[28]) | uint32(p.payload[29])<<8 |
-		uint32(p.payload[30])<<16 | uint32(p.payload[31])<<24)
+	rpm, _ := GetMapInt(m, 2)
+	target, _ := GetMapInt(m, 3)
+	pwm, hasPWM := GetMapUint(m, 6)
+	pwmMax, hasPWMMax := GetMapUint(m, 7)
 
 	if rpm > 6000 || target > 6000 {
 		errors = append(errors, ValidationError{
@@ -116,7 +126,7 @@ func validateMotorData(p *Packet) []ValidationError {
 		})
 	}
 
-	if pwmMax > 0 && pwm > pwmMax {
+	if hasPWM && hasPWMMax && pwmMax > 0 && pwm > pwmMax {
 		errors = append(errors, ValidationError{
 			Type:    AnomalyInvalidPWM,
 			Message: fmt.Sprintf("PWM > pwmMax (%d > %d)", pwm, pwmMax),
@@ -127,36 +137,22 @@ func validateMotorData(p *Packet) []ValidationError {
 	return errors
 }
 
-// validateTemperatureData validates TEMP_DATA packet
-func validateTemperatureData(p *Packet) []ValidationError {
+// validateTemperatureData validates TEMP_DATA payload
+// CBOR keys: 0=thermometer, 1=timestamp, 2=reading, 3=temperature-rpm-control, 4=watched-motor, 5=target-temperature
+func validateTemperatureData(m map[int]interface{}) []ValidationError {
 	errors := []ValidationError{}
 
-	if len(p.payload) < 32 {
+	if m == nil {
 		return []ValidationError{{
 			Type:    AnomalyLengthMismatch,
-			Message: "TEMP_DATA payload too short (expected at least 32 bytes)",
-			Details: map[string]interface{}{"length": len(p.payload), "minimum": 32},
+			Message: "TEMP_DATA missing payload",
+			Details: map[string]interface{}{},
 		}}
 	}
 
-	// Current temperature
-	tempBits := uint64(p.payload[8]) | uint64(p.payload[9])<<8 |
-		uint64(p.payload[10])<<16 | uint64(p.payload[11])<<24 |
-		uint64(p.payload[12])<<32 | uint64(p.payload[13])<<40 |
-		uint64(p.payload[14])<<48 | uint64(p.payload[15])<<56
-	temp := Float64frombits(tempBits)
-
-	// Target temperature (if available)
-	var targetTemp float64
-	if len(p.payload) >= 32 {
-		targetBits := uint64(p.payload[24]) | uint64(p.payload[25])<<8 |
-			uint64(p.payload[26])<<16 | uint64(p.payload[27])<<24 |
-			uint64(p.payload[28])<<32 | uint64(p.payload[29])<<40 |
-			uint64(p.payload[30])<<48 | uint64(p.payload[31])<<56
-		targetTemp = Float64frombits(targetBits)
-	}
-
-	if temp < -50.0 || temp > 1000.0 {
+	// Current temperature (key 2)
+	temp, hasTemp := GetMapFloat(m, 2)
+	if hasTemp && (temp < -50.0 || temp > 1000.0) {
 		errors = append(errors, ValidationError{
 			Type:    AnomalyInvalidTemp,
 			Message: fmt.Sprintf("Temperature out of range (%.1f°C, valid: -50 to 1000°C)", temp),
@@ -164,7 +160,9 @@ func validateTemperatureData(p *Packet) []ValidationError {
 		})
 	}
 
-	if len(p.payload) >= 32 && (targetTemp < -50.0 || targetTemp > 1000.0) {
+	// Target temperature (key 5, optional)
+	targetTemp, hasTarget := GetMapFloat(m, 5)
+	if hasTarget && (targetTemp < -50.0 || targetTemp > 1000.0) {
 		errors = append(errors, ValidationError{
 			Type:    AnomalyInvalidTemp,
 			Message: fmt.Sprintf("Target temperature out of range (%.1f°C, valid: -50 to 1000°C)", targetTemp),
@@ -175,24 +173,22 @@ func validateTemperatureData(p *Packet) []ValidationError {
 	return errors
 }
 
-// validateGlowCommand validates GLOW_COMMAND packet
-func validateGlowCommand(p *Packet) []ValidationError {
+// validateGlowCommand validates GLOW_COMMAND payload
+// CBOR keys: 0=glow, 1=duration
+func validateGlowCommand(m map[int]interface{}) []ValidationError {
 	errors := []ValidationError{}
 
-	if len(p.payload) != 8 {
+	if m == nil {
 		return []ValidationError{{
 			Type:    AnomalyLengthMismatch,
-			Message: "GLOW_COMMAND payload length mismatch (expected 8 bytes)",
-			Details: map[string]interface{}{"length": len(p.payload), "expected": 8},
+			Message: "GLOW_COMMAND missing payload",
+			Details: map[string]interface{}{},
 		}}
 	}
 
-	// Extract duration (bytes 4-7, little-endian int32)
-	duration := int32(uint32(p.payload[4]) | uint32(p.payload[5])<<8 |
-		uint32(p.payload[6])<<16 | uint32(p.payload[7])<<24)
-
-	// Validate duration (0-300000 ms)
-	if duration < 0 || duration > 300000 {
+	// Duration (key 1)
+	duration, ok := GetMapInt(m, 1)
+	if ok && (duration < 0 || duration > 300000) {
 		errors = append(errors, ValidationError{
 			Type:    AnomalyInvalidValue,
 			Message: fmt.Sprintf("Invalid glow duration (%d ms, valid: 0-300000)", duration),
@@ -203,31 +199,28 @@ func validateGlowCommand(p *Packet) []ValidationError {
 	return errors
 }
 
-// validateDeviceAnnounce validates DEVICE_ANNOUNCE packet
-func validateDeviceAnnounce(p *Packet) []ValidationError {
+// validateDeviceAnnounce validates DEVICE_ANNOUNCE payload
+// CBOR keys: 0=motor-count, 1=thermometer-count, 2=pump-count, 3=glow-count
+func validateDeviceAnnounce(m map[int]interface{}, isStateless bool) []ValidationError {
 	errors := []ValidationError{}
 
-	// Per spec: 4 bytes for counts (u8 each) + 4 bytes padding = 8 bytes
-	// But we only need the first 4 bytes for validation
-	if len(p.payload) < 4 {
-		return []ValidationError{{
-			Type:    AnomalyLengthMismatch,
-			Message: "DEVICE_ANNOUNCE payload too short (expected at least 4 bytes)",
-			Details: map[string]interface{}{"length": len(p.payload), "minimum": 4},
-		}}
-	}
-
 	// End-of-discovery marker uses stateless address with all zeros
-	if p.IsStateless() {
-		// This is an end-of-discovery marker - all counts should be 0
+	if isStateless {
 		return errors
 	}
 
-	// Per spec: counts are u8 (1 byte each)
-	motorCount := p.payload[0]
-	tempCount := p.payload[1]
-	pumpCount := p.payload[2]
-	glowCount := p.payload[3]
+	if m == nil {
+		return []ValidationError{{
+			Type:    AnomalyLengthMismatch,
+			Message: "DEVICE_ANNOUNCE missing payload",
+			Details: map[string]interface{}{},
+		}}
+	}
+
+	motorCount, _ := GetMapUint(m, 0)
+	tempCount, _ := GetMapUint(m, 1)
+	pumpCount, _ := GetMapUint(m, 2)
+	glowCount, _ := GetMapUint(m, 3)
 
 	if motorCount > 10 {
 		errors = append(errors, ValidationError{

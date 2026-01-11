@@ -107,7 +107,7 @@ func (d *Decoder) DecodeByte(b byte) (*Packet, error) {
 			d.Reset()
 			return nil, fmt.Errorf("buffer overflow at length byte")
 		}
-		d.packet = &Packet{length: b, payload: make([]byte, 0, b)}
+		d.packet = &Packet{length: b, cborPayload: make([]byte, 0, b)}
 		d.buffer[d.bufferIndex] = b
 		d.bufferIndex++
 		d.addressBytes = 0
@@ -126,23 +126,12 @@ func (d *Decoder) DecodeByte(b byte) (*Packet, error) {
 		d.bufferIndex++
 		d.addressBytes++
 		if d.addressBytes >= AddressSize {
-			d.state = stateType
-		}
-		return nil, nil
-
-	case stateType:
-		// Check for buffer overflow
-		if d.bufferIndex >= MaxPacketSize {
-			d.Reset()
-			return nil, fmt.Errorf("buffer overflow at type byte")
-		}
-		d.packet.msgType = b
-		d.buffer[d.bufferIndex] = b
-		d.bufferIndex++
-		if d.packet.length == 0 {
-			d.state = stateCRC1
-		} else {
-			d.state = statePayload
+			// Go directly to PAYLOAD (no separate TYPE byte)
+			if d.packet.length == 0 {
+				d.state = stateCRC1
+			} else {
+				d.state = statePayload
+			}
 		}
 		return nil, nil
 
@@ -152,10 +141,10 @@ func (d *Decoder) DecodeByte(b byte) (*Packet, error) {
 			d.Reset()
 			return nil, fmt.Errorf("buffer overflow: packet exceeds max size")
 		}
-		d.packet.payload = append(d.packet.payload, b)
+		d.packet.cborPayload = append(d.packet.cborPayload, b)
 		d.buffer[d.bufferIndex] = b
 		d.bufferIndex++
-		if len(d.packet.payload) >= int(d.packet.length) {
+		if len(d.packet.cborPayload) >= int(d.packet.length) {
 			d.state = stateCRC1
 		}
 		return nil, nil

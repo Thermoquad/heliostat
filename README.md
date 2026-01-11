@@ -2,15 +2,13 @@
 
 A CLI tool for monitoring and analyzing Fusain serial protocol packets in real-time.
 
-**Protocol Version:** Fusain v2.0
-
 ## Features
 
 - **Raw Log Mode**: Display decoded packets in human-readable format
 - **Error Detection Mode**: Track malformed packets, CRC errors, and anomalous values with live statistics
 - **Reference Go Implementation**: `pkg/fusain` provides the canonical Go implementation of the Fusain protocol
 - **Real-time Validation**: Detect suspicious packet data as it arrives
-- **TUI Mode**: Interactive terminal UI with live statistics (default)
+- **TUI Mode**: Interactive terminal UI with live statistics and telemetry (default)
 
 ## Installation
 
@@ -77,7 +75,7 @@ The `error_detection` command validates packets and detects:
 
 ### Malformed Packets
 - **Invalid Counts**: `motor_count` or `temp_count` exceeding limits
-- **Length Mismatches**: Payload length doesn't match expected size
+- **CBOR Parse Errors**: Invalid CBOR structure or missing required fields
 
 ### Decode Errors
 - **CRC Failures**: CRC-16-CCITT checksum validation failures
@@ -87,7 +85,7 @@ The `error_detection` command validates packets and detects:
 ### Anomalous Values
 - **High RPM**: Motor RPM or target RPM exceeding 6000
 - **Invalid Temperatures**: Values outside -50°C to 1000°C range
-- **Invalid PWM**: PWM duty cycle exceeding PWM period
+- **Invalid PWM**: PWM value exceeding PWM max
 
 ### Statistics Tracking
 - Total packets received
@@ -95,6 +93,12 @@ The `error_detection` command validates packets and detects:
 - Breakdown by error type
 - Packet rate (packets/second)
 - Error rate (errors/second)
+
+### Live Telemetry Display (TUI Mode)
+- Current system state and error code
+- Device uptime (from PING_RESPONSE)
+- Motor RPMs and targets
+- Temperature readings
 
 ## Protocol Package
 
@@ -108,6 +112,12 @@ decoder := fusain.NewDecoder()
 
 // Decode bytes
 packet, err := decoder.DecodeByte(byteValue)
+
+// Access CBOR payload
+payloadMap := packet.PayloadMap()
+if state, ok := fusain.GetMapUint(payloadMap, 2); ok {
+    fmt.Printf("State: %d\n", state)
+}
 
 // Validate packet
 errors := fusain.ValidatePacket(packet)
@@ -126,8 +136,9 @@ fmt.Println(stats.String())
 ```
 pkg/fusain/
 ├── constants.go    # Protocol constants (message types, framing bytes, limits)
-├── packet.go       # Packet structure and methods
+├── packet.go       # Packet structure with CBOR payload
 ├── decoder.go      # State machine decoder with byte unstuffing
+├── cbor.go         # CBOR parsing helpers (GetMapUint, GetMapInt, etc.)
 ├── crc.go          # CRC-16-CCITT calculation
 ├── formatter.go    # Human-readable packet formatting
 ├── validator.go    # Packet validation and anomaly detection
@@ -136,8 +147,26 @@ pkg/fusain/
 └── fuzz_test.go    # Fuzz testing
 ```
 
-The package is a **standalone Go module** with no external dependencies (stdlib only),
-allowing it to be imported by other Go tools.
+The package is a **standalone Go module** that can be imported by other Go tools.
+
+### Dependencies
+
+- `github.com/fxamacker/cbor/v2` - CBOR encoding/decoding
+
+## Protocol Format
+
+Fusain uses CBOR-encoded payloads:
+
+```
+[START][LENGTH][ADDRESS(8)][CBOR_PAYLOAD][CRC(2)][END]
+```
+
+The CBOR payload is a 2-element array: `[msg_type, payload_map]`
+
+- `msg_type`: Message type (0x00-0xFF)
+- `payload_map`: CBOR map with integer keys, or `nil` for empty payloads
+
+Example PING_REQUEST: `0x82 0x2F 0xF6` → `[47, nil]`
 
 ## Development
 
@@ -180,7 +209,7 @@ go mod tidy
 The Fusain protocol specification is maintained in the Sphinx documentation:
 
 - **Location:** `origin/documentation/source/specifications/fusain/`
-- **Contents:** Packet format, message types, payloads, communication patterns
+- **Contents:** Packet format, message types, CBOR payload structures, communication patterns
 
 ## Related Projects
 
