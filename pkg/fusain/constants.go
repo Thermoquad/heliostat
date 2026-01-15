@@ -128,7 +128,7 @@ const (
 	ModeIdle      Mode = 0x00
 	ModeFan       Mode = 0x01
 	ModeHeat      Mode = 0x02
-	ModeEmergency Mode = 0x03
+	ModeEmergency Mode = 0xFF
 )
 
 // TempCmdType represents temperature command types
