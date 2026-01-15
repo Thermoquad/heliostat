@@ -16,7 +16,8 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version-file: pkg/fusain/go.mod
+          go-version-file: go.mod
+          cache: true
 
       - name: Install Task
         uses: go-task/setup-task@v1

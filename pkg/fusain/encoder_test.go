@@ -2,8 +2,40 @@ package fusain
 
 import (
 	"bytes"
+	"math"
 	"testing"
 )
+
+// payloadValuesEqual compares payload values accounting for CBOR type coercion.
+// CBOR may decode uint64 as int64 or vice versa, and floats need epsilon comparison.
+func payloadValuesEqual(expected, actual interface{}) bool {
+	switch e := expected.(type) {
+	case uint64:
+		switch a := actual.(type) {
+		case uint64:
+			return e == a
+		case int64:
+			return a >= 0 && uint64(a) == e
+		}
+	case int64:
+		switch a := actual.(type) {
+		case int64:
+			return e == a
+		case uint64:
+			return e >= 0 && uint64(e) == a
+		}
+	case float64:
+		switch a := actual.(type) {
+		case float64:
+			return math.Abs(e-a) < 0.0001
+		}
+	case bool:
+		if a, ok := actual.(bool); ok {
+			return e == a
+		}
+	}
+	return false
+}
 
 func TestEncodePacket_RoundTrip(t *testing.T) {
 	tests := []struct {
@@ -100,6 +132,32 @@ func TestEncodePacket_RoundTrip(t *testing.T) {
 			if decoded.Type() != tt.msgType {
 				t.Errorf("msgType mismatch: got 0x%02X, want 0x%02X", decoded.Type(), tt.msgType)
 			}
+
+			// Verify payload values survived round-trip
+			if tt.payloadMap != nil {
+				decodedPayload := decoded.PayloadMap()
+				if decodedPayload == nil {
+					t.Error("expected payload map, got nil")
+				} else {
+					for key, expectedValue := range tt.payloadMap {
+						actualValue, ok := decodedPayload[key]
+						if !ok {
+							t.Errorf("missing payload key %d", key)
+							continue
+						}
+						if !payloadValuesEqual(expectedValue, actualValue) {
+							t.Errorf("payload[%d] mismatch: got %v (%T), want %v (%T)",
+								key, actualValue, actualValue, expectedValue, expectedValue)
+						}
+					}
+				}
+			} else {
+				// Nil payload should decode as nil or empty map
+				decodedPayload := decoded.PayloadMap()
+				if decodedPayload != nil && len(decodedPayload) > 0 {
+					t.Errorf("expected nil payload, got %v", decodedPayload)
+				}
+			}
 		})
 	}
 }
@@ -185,6 +243,16 @@ func TestUnstuffBytes(t *testing.T) {
 				t.Errorf("UnstuffBytes(%v) = %v, want %v", tt.input, result, tt.expect)
 			}
 		})
+	}
+}
+
+func TestUnstuffBytes_IncompleteEscape(t *testing.T) {
+	// Test error path: escape byte at end of data with no following byte
+	input := []byte{0x01, 0x02, EscByte}
+
+	_, err := UnstuffBytes(input)
+	if err == nil {
+		t.Error("expected error for incomplete escape sequence, got nil")
 	}
 }
 
