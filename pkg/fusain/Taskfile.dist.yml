@@ -66,14 +66,28 @@ tasks:
     desc: Run go mod tidy
     cmd: go mod tidy
 
+  deps:
+    desc: Download and verify dependencies
+    cmds:
+      - go mod download
+      - go mod verify
+
+  build:
+    desc: Verify package builds
+    cmd: go build
+
   ci:
-    desc: Run CI checks - format check, vet, and test suite with 100,000 fuzz rounds
+    desc: Run CI checks - deps, format check, vet, build, and test suite with 100,000 fuzz rounds
     cmds:
       - echo "Running fusain CI checks..."
+      - echo ""
+      - task: deps
       - echo ""
       - task: format-check
       - echo ""
       - task: vet
+      - echo ""
+      - task: build
       - echo ""
       - echo "Running test suite with 100,000 fuzz rounds..."
       - task: test

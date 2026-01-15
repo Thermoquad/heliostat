@@ -1,0 +1,28 @@
+#!/bin/bash
+# This hook is installed by running: task install-git-hooks
+
+set -e
+
+echo "Running pre-commit checks..."
+echo ""
+
+cd "$(git rev-parse --show-toplevel)"
+
+if ! task ci; then
+    echo ""
+    echo "❌ heliostat CI checks failed"
+    exit 1
+fi
+
+echo ""
+
+if ! task fusain:ci; then
+    echo ""
+    echo "❌ fusain CI checks failed"
+    exit 1
+fi
+
+echo ""
+echo "✅ All pre-commit checks passed!"
+
+exit 0

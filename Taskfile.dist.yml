@@ -8,6 +8,10 @@ includes:
     dir: ./pkg/fusain
 
 tasks:
+  test:
+    desc: Run heliostat tests
+    cmd: go test -v ./...
+
   build:
     desc: Build the heliostat binary
     cmd: go build -o heliostat .
@@ -54,26 +58,47 @@ tasks:
       - go mod tidy
       - task: fusain:mod-tidy
 
-  ci:
-    desc: Run CI checks - format check, vet, and test suite with 100,000 fuzz rounds
+  mod-tidy-check:
+    desc: Verify go.mod files are tidy (all modules)
     cmds:
-      - echo "Running CI checks..."
+      - task: mod-tidy
+      - |
+        if ! git diff --exit-code go.mod go.sum pkg/fusain/go.mod pkg/fusain/go.sum; then
+          echo ""
+          echo "go.mod files are not tidy. Run 'task mod-tidy' to fix."
+          exit 1
+        fi
+
+  ci:
+    desc: Run CI checks - mod-tidy, deps, format check, vet, test, and build
+    cmds:
+      - echo "Running heliostat CI checks..."
+      - echo ""
+      - task: mod-tidy-check
+      - echo ""
+      - task: deps
       - echo ""
       - task: format-check
       - echo ""
       - task: vet
       - echo ""
-      - echo "Running test suite with 100,000 fuzz rounds..."
-      - echo "This may take a few seconds. Please be patient."
-      - task: fusain:test
-        vars:
-          CLI_ARGS: "100000"
+      - task: test
+      - echo ""
+      - task: build
 
   deps:
     desc: Download and verify dependencies
     cmds:
       - go mod download
       - go mod verify
+
+  install-git-hooks:
+    desc: Install Git hooks for pre-commit checks
+    cmds:
+      - mkdir -p .git/hooks
+      - cp git-hooks/pre-commit .git/hooks/pre-commit
+      - chmod +x .git/hooks/pre-commit
+      - echo "✅ Git hooks installed successfully"
 
   all:
     desc: Run format, lint, test, and build
