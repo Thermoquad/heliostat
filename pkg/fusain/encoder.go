@@ -63,6 +63,11 @@ func EncodePacketFromValues(address uint64, msgType uint8, payloadMap map[int]in
 
 // EncodePacket encodes an existing Packet struct back to wire format.
 // Panics on encoding error (use Encoder.Encode for error handling).
+//
+// WARNING: Do not use with untrusted packet data. An attacker could craft
+// packets that decode successfully but fail to re-encode (e.g., oversized
+// payload), causing a panic and application crash. Use Encoder.Encode() or
+// EncodePacketFromValues() for untrusted data as they return errors instead.
 func EncodePacket(p *Packet) []byte {
 	data, err := EncodePacketFromValues(p.Address(), p.Type(), p.PayloadMap())
 	if err != nil {

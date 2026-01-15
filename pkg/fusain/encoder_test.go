@@ -339,3 +339,151 @@ func TestEncodePacket_FromPacket(t *testing.T) {
 		t.Error("packet framing incorrect")
 	}
 }
+
+func TestEncodePacket_Panic(t *testing.T) {
+	// Verify that EncodePacket panics on oversized payload as documented
+	defer func() {
+		if r := recover(); r == nil {
+			t.Error("EncodePacket should panic on oversized payload")
+		}
+	}()
+
+	// Create oversized payload that will exceed MaxPayloadSize
+	largePayload := make(map[int]interface{})
+	for i := 0; i < 200; i++ {
+		largePayload[i] = uint64(i)
+	}
+
+	p := NewPacketWithPayload(0, MsgStateData, largePayload)
+	EncodePacket(p) // Should panic
+}
+
+func TestEncodePacket_MessageTypeBoundary(t *testing.T) {
+	// Test encoding with max message type value (0xFF)
+	encoded, err := EncodePacketFromValues(0x1234567890ABCDEF, 0xFF, nil)
+	if err != nil {
+		t.Fatalf("EncodePacketFromValues failed for msgType 0xFF: %v", err)
+	}
+
+	// Decode and verify
+	decoder := NewDecoder()
+	var decoded *Packet
+	for _, b := range encoded {
+		p, err := decoder.DecodeByte(b)
+		if err != nil {
+			t.Fatalf("Decoder error: %v", err)
+		}
+		if p != nil {
+			decoded = p
+		}
+	}
+
+	if decoded == nil {
+		t.Fatal("Decoder did not produce a packet")
+	}
+	if decoded.Type() != 0xFF {
+		t.Errorf("msgType mismatch: got 0x%02X, want 0xFF", decoded.Type())
+	}
+}
+
+func TestEncodePacket_ZeroLengthPayload(t *testing.T) {
+	// Test that nil payload produces correct length byte (0x00 for CBOR [type, nil])
+	encoded, err := EncodePacketFromValues(0x1234567890ABCDEF, MsgPingRequest, nil)
+	if err != nil {
+		t.Fatalf("EncodePacketFromValues failed: %v", err)
+	}
+
+	// Unstuff the packet content (between START and END bytes)
+	unstuffed, err := UnstuffBytes(encoded[1 : len(encoded)-1])
+	if err != nil {
+		t.Fatalf("UnstuffBytes failed: %v", err)
+	}
+
+	// First byte after unstuffing is the length byte
+	// For nil payload, CBOR encodes [msgType, nil] which is small but not zero
+	lengthByte := unstuffed[0]
+	if lengthByte == 0 {
+		t.Error("length byte should not be 0 for CBOR-encoded [msgType, nil]")
+	}
+	// Verify the length is reasonable (CBOR array with type and nil is ~3-4 bytes)
+	if lengthByte > 10 {
+		t.Errorf("length byte unexpectedly large for nil payload: %d", lengthByte)
+	}
+}
+
+func TestStuffBytes_ConsecutiveSpecialBytes(t *testing.T) {
+	tests := []struct {
+		name   string
+		input  []byte
+		expect []byte
+	}{
+		{
+			name:  "consecutive start bytes",
+			input: []byte{StartByte, StartByte, StartByte},
+			expect: []byte{
+				EscByte, StartByte ^ EscXor,
+				EscByte, StartByte ^ EscXor,
+				EscByte, StartByte ^ EscXor,
+			},
+		},
+		{
+			name:  "consecutive end bytes",
+			input: []byte{EndByte, EndByte, EndByte},
+			expect: []byte{
+				EscByte, EndByte ^ EscXor,
+				EscByte, EndByte ^ EscXor,
+				EscByte, EndByte ^ EscXor,
+			},
+		},
+		{
+			name:  "consecutive escape bytes",
+			input: []byte{EscByte, EscByte, EscByte},
+			expect: []byte{
+				EscByte, EscByte ^ EscXor,
+				EscByte, EscByte ^ EscXor,
+				EscByte, EscByte ^ EscXor,
+			},
+		},
+		{
+			name:  "alternating special bytes",
+			input: []byte{StartByte, EndByte, StartByte, EndByte},
+			expect: []byte{
+				EscByte, StartByte ^ EscXor,
+				EscByte, EndByte ^ EscXor,
+				EscByte, StartByte ^ EscXor,
+				EscByte, EndByte ^ EscXor,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := stuffBytes(tt.input)
+			if !bytes.Equal(result, tt.expect) {
+				t.Errorf("stuffBytes(%v) = %v, want %v", tt.input, result, tt.expect)
+			}
+
+			// Also verify round-trip
+			unstuffed, err := UnstuffBytes(result)
+			if err != nil {
+				t.Fatalf("UnstuffBytes error: %v", err)
+			}
+			if !bytes.Equal(unstuffed, tt.input) {
+				t.Errorf("round-trip failed: got %v, want %v", unstuffed, tt.input)
+			}
+		})
+	}
+}
+
+func TestEncodePacket_CBOREncodingError(t *testing.T) {
+	// Test that unencodable CBOR types return an error
+	// Channels cannot be encoded to CBOR
+	invalidPayload := map[int]interface{}{
+		0: make(chan int),
+	}
+
+	_, err := EncodePacketFromValues(0, MsgStateData, invalidPayload)
+	if err == nil {
+		t.Error("expected error for unencodable CBOR payload (channel), got nil")
+	}
+}

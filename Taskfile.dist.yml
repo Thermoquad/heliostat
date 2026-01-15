@@ -58,10 +58,23 @@ tasks:
       - go mod tidy
       - task: fusain:mod-tidy
 
+  mod-tidy-check:
+    desc: Verify go.mod files are tidy (all modules)
+    cmds:
+      - task: mod-tidy
+      - |
+        if ! git diff --exit-code go.mod go.sum pkg/fusain/go.mod pkg/fusain/go.sum; then
+          echo ""
+          echo "go.mod files are not tidy. Run 'task mod-tidy' to fix."
+          exit 1
+        fi
+
   ci:
-    desc: Run CI checks - deps, format check, vet, test, and build
+    desc: Run CI checks - mod-tidy, deps, format check, vet, test, and build
     cmds:
       - echo "Running heliostat CI checks..."
+      - echo ""
+      - task: mod-tidy-check
       - echo ""
       - task: deps
       - echo ""
