@@ -31,6 +31,18 @@ func NewPacket(length uint8, address uint64, cborPayload []byte, crc uint16) *Pa
 	}
 }
 
+// NewPacketWithPayload creates a new packet from message type and payload map.
+// The CBOR encoding and CRC are computed automatically.
+func NewPacketWithPayload(address uint64, msgType uint8, payload map[int]interface{}) *Packet {
+	return &Packet{
+		address:    address,
+		msgType:    msgType,
+		payloadMap: payload,
+		parsed:     true,
+		timestamp:  time.Now(),
+	}
+}
+
 // ensureParsed parses the CBOR payload if not already done
 func (p *Packet) ensureParsed() {
 	if p.parsed {
