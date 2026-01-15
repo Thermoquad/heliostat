@@ -103,6 +103,14 @@ func TestNewStateCommand_RoundTrip(t *testing.T) {
 	if mode != 1 {
 		t.Errorf("decoded mode = %d, want 1", mode)
 	}
+
+	argument, ok := GetMapInt(payload, 1)
+	if !ok {
+		t.Error("decoded payload missing argument (key 1)")
+	}
+	if argument != 2500 {
+		t.Errorf("decoded argument = %d, want 2500", argument)
+	}
 }
 
 func TestNewPingRequest(t *testing.T) {
@@ -179,6 +187,41 @@ func TestNewTelemetryConfig(t *testing.T) {
 				t.Errorf("interval_ms = %d, want %d", interval, tt.intervalMs)
 			}
 		})
+	}
+}
+
+func TestNewTelemetryConfig_RoundTrip(t *testing.T) {
+	p := NewTelemetryConfig(0x1234567890ABCDEF, true, 100)
+
+	encoded, err := EncodePacket(p.Address(), p.Type(), p.PayloadMap())
+	if err != nil {
+		t.Fatalf("EncodePacket failed: %v", err)
+	}
+
+	decoded, err := DecodePacket(encoded)
+	if err != nil {
+		t.Fatalf("DecodePacket failed: %v", err)
+	}
+
+	if decoded.Type() != MsgTelemetryConfig {
+		t.Errorf("decoded Type() = 0x%02X, want 0x%02X", decoded.Type(), MsgTelemetryConfig)
+	}
+
+	payload := decoded.PayloadMap()
+	enabled, ok := GetMapBool(payload, 0)
+	if !ok {
+		t.Error("decoded payload missing enabled (key 0)")
+	}
+	if enabled != true {
+		t.Errorf("decoded enabled = %v, want true", enabled)
+	}
+
+	interval, ok := GetMapUint(payload, 1)
+	if !ok {
+		t.Error("decoded payload missing interval_ms (key 1)")
+	}
+	if interval != 100 {
+		t.Errorf("decoded interval_ms = %d, want 100", interval)
 	}
 }
 
@@ -272,6 +315,41 @@ func TestNewPumpCommand_Stop(t *testing.T) {
 	rateMs, _ := GetMapInt(payload, 1)
 	if rateMs != 0 {
 		t.Errorf("rate_ms = %d, want 0 (stop)", rateMs)
+	}
+}
+
+func TestNewPumpCommand_RoundTrip(t *testing.T) {
+	p := NewPumpCommand(0x1234567890ABCDEF, 1, 200)
+
+	encoded, err := EncodePacket(p.Address(), p.Type(), p.PayloadMap())
+	if err != nil {
+		t.Fatalf("EncodePacket failed: %v", err)
+	}
+
+	decoded, err := DecodePacket(encoded)
+	if err != nil {
+		t.Fatalf("DecodePacket failed: %v", err)
+	}
+
+	if decoded.Type() != MsgPumpCommand {
+		t.Errorf("decoded Type() = 0x%02X, want 0x%02X", decoded.Type(), MsgPumpCommand)
+	}
+
+	payload := decoded.PayloadMap()
+	pump, ok := GetMapInt(payload, 0)
+	if !ok {
+		t.Error("decoded payload missing pump (key 0)")
+	}
+	if pump != 1 {
+		t.Errorf("decoded pump = %d, want 1", pump)
+	}
+
+	rateMs, ok := GetMapInt(payload, 1)
+	if !ok {
+		t.Error("decoded payload missing rate_ms (key 1)")
+	}
+	if rateMs != 200 {
+		t.Errorf("decoded rate_ms = %d, want 200", rateMs)
 	}
 }
 
