@@ -7,23 +7,9 @@ import (
 	"github.com/fxamacker/cbor/v2"
 )
 
-// Encoder encodes Fusain packets for transmission.
-// Handles CBOR encoding, byte stuffing, and CRC calculation.
-type Encoder struct{}
-
-// NewEncoder creates a new Fusain packet encoder.
-func NewEncoder() *Encoder {
-	return &Encoder{}
-}
-
-// Encode encodes a Packet to wire format.
-func (e *Encoder) Encode(p *Packet) ([]byte, error) {
-	return EncodePacketFromValues(p.Address(), p.Type(), p.PayloadMap())
-}
-
-// EncodePacketFromValues creates a complete wire-formatted Fusain packet.
+// EncodePacket creates a complete wire-formatted Fusain packet.
 // Returns the packet bytes ready for transmission, including framing and byte stuffing.
-func EncodePacketFromValues(address uint64, msgType uint8, payloadMap map[int]interface{}) ([]byte, error) {
+func EncodePacket(address uint64, msgType uint8, payloadMap map[int]interface{}) ([]byte, error) {
 	// Build CBOR payload: [msgType, payloadMap]
 	cborPayload, err := encodeCBORPayload(msgType, payloadMap)
 	if err != nil {
@@ -61,15 +47,15 @@ func EncodePacketFromValues(address uint64, msgType uint8, payloadMap map[int]in
 	return packet, nil
 }
 
-// EncodePacket encodes an existing Packet struct back to wire format.
-// Panics on encoding error (use Encoder.Encode for error handling).
+// MustEncodePacket encodes an existing Packet struct back to wire format.
+// Panics on encoding error (use EncodePacket for error handling).
 //
 // WARNING: Do not use with untrusted packet data. An attacker could craft
 // packets that decode successfully but fail to re-encode (e.g., oversized
-// payload), causing a panic and application crash. Use Encoder.Encode() or
-// EncodePacketFromValues() for untrusted data as they return errors instead.
-func EncodePacket(p *Packet) []byte {
-	data, err := EncodePacketFromValues(p.Address(), p.Type(), p.PayloadMap())
+// payload), causing a panic and application crash. Use EncodePacket() for
+// untrusted data as it returns errors instead.
+func MustEncodePacket(p *Packet) []byte {
+	data, err := EncodePacket(p.Address(), p.Type(), p.PayloadMap())
 	if err != nil {
 		panic(fmt.Sprintf("fusain: encode error: %v", err))
 	}
@@ -110,9 +96,9 @@ func stuffBytes(data []byte) []byte {
 	return result
 }
 
-// UnstuffBytes removes byte stuffing from escaped data.
+// unstuffBytes removes byte stuffing from escaped data.
 // This is the inverse of stuffBytes.
-func UnstuffBytes(data []byte) ([]byte, error) {
+func unstuffBytes(data []byte) ([]byte, error) {
 	result := make([]byte, 0, len(data))
 	escapeNext := false
 

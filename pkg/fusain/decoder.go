@@ -8,6 +8,39 @@ import (
 	"time"
 )
 
+// DecodePacket decodes a complete wire-formatted Fusain packet.
+// This is a convenience function that creates a temporary decoder,
+// processes all bytes, and returns the resulting packet.
+// Returns an error if decoding fails or the data is incomplete.
+func DecodePacket(data []byte) (*Packet, error) {
+	if len(data) == 0 {
+		return nil, fmt.Errorf("empty packet data")
+	}
+
+	decoder := NewDecoder()
+	var packet *Packet
+	var lastErr error
+
+	for _, b := range data {
+		p, err := decoder.DecodeByte(b)
+		if err != nil {
+			lastErr = err
+		}
+		if p != nil {
+			packet = p
+		}
+	}
+
+	if packet == nil {
+		if lastErr != nil {
+			return nil, lastErr
+		}
+		return nil, fmt.Errorf("incomplete packet data")
+	}
+
+	return packet, nil
+}
+
 // Decoder implements the Fusain protocol packet decoder state machine
 type Decoder struct {
 	state        int

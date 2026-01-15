@@ -94,10 +94,10 @@ func TestEncodePacket_RoundTrip(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Encode the packet using EncodePacketFromValues
-			encoded, err := EncodePacketFromValues(tt.address, tt.msgType, tt.payloadMap)
+			// Encode the packet using EncodePacket
+			encoded, err := EncodePacket(tt.address, tt.msgType, tt.payloadMap)
 			if err != nil {
-				t.Fatalf("EncodePacketFromValues failed: %v", err)
+				t.Fatalf("EncodePacket failed: %v", err)
 			}
 
 			// Verify framing
@@ -205,7 +205,7 @@ func TestStuffBytes(t *testing.T) {
 	}
 }
 
-func TestUnstuffBytes(t *testing.T) {
+func Test_unstuffBytes(t *testing.T) {
 	tests := []struct {
 		name   string
 		input  []byte
@@ -235,22 +235,22 @@ func TestUnstuffBytes(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result, err := UnstuffBytes(tt.input)
+			result, err := unstuffBytes(tt.input)
 			if err != nil {
-				t.Fatalf("UnstuffBytes error: %v", err)
+				t.Fatalf("unstuffBytes error: %v", err)
 			}
 			if !bytes.Equal(result, tt.expect) {
-				t.Errorf("UnstuffBytes(%v) = %v, want %v", tt.input, result, tt.expect)
+				t.Errorf("unstuffBytes(%v) = %v, want %v", tt.input, result, tt.expect)
 			}
 		})
 	}
 }
 
-func TestUnstuffBytes_IncompleteEscape(t *testing.T) {
+func Test_unstuffBytes_IncompleteEscape(t *testing.T) {
 	// Test error path: escape byte at end of data with no following byte
 	input := []byte{0x01, 0x02, EscByte}
 
-	_, err := UnstuffBytes(input)
+	_, err := unstuffBytes(input)
 	if err == nil {
 		t.Error("expected error for incomplete escape sequence, got nil")
 	}
@@ -267,9 +267,9 @@ func TestStuffUnstuffRoundTrip(t *testing.T) {
 
 	for _, input := range inputs {
 		stuffed := stuffBytes(input)
-		unstuffed, err := UnstuffBytes(stuffed)
+		unstuffed, err := unstuffBytes(stuffed)
 		if err != nil {
-			t.Errorf("UnstuffBytes error for input %v: %v", input, err)
+			t.Errorf("unstuffBytes error for input %v: %v", input, err)
 			continue
 		}
 		if !bytes.Equal(unstuffed, input) {
@@ -285,25 +285,45 @@ func TestEncodePacket_PayloadTooLarge(t *testing.T) {
 		largePayload[i] = uint64(i)
 	}
 
-	_, err := EncodePacketFromValues(0, MsgStateData, largePayload)
+	_, err := EncodePacket(0, MsgStateData, largePayload)
 	if err == nil {
 		t.Error("expected error for oversized payload, got nil")
 	}
 }
 
-func TestEncoder_Struct(t *testing.T) {
-	encoder := NewEncoder()
-
-	// Create packet using NewPacketWithPayload
-	p := NewPacketWithPayload(0x1234567890ABCDEF, MsgPingRequest, nil)
-
-	encoded, err := encoder.Encode(p)
+func TestDecodePacket(t *testing.T) {
+	// First encode a packet
+	encoded, err := EncodePacket(0x1234567890ABCDEF, MsgPingRequest, nil)
 	if err != nil {
-		t.Fatalf("Encoder.Encode failed: %v", err)
+		t.Fatalf("EncodePacket failed: %v", err)
 	}
 
-	if encoded[0] != StartByte || encoded[len(encoded)-1] != EndByte {
-		t.Error("packet framing incorrect")
+	// Then decode it using the convenience function
+	decoded, err := DecodePacket(encoded)
+	if err != nil {
+		t.Fatalf("DecodePacket failed: %v", err)
+	}
+
+	if decoded.Address() != 0x1234567890ABCDEF {
+		t.Errorf("address mismatch: got 0x%X, want 0x1234567890ABCDEF", decoded.Address())
+	}
+	if decoded.Type() != MsgPingRequest {
+		t.Errorf("type mismatch: got 0x%02X, want 0x%02X", decoded.Type(), MsgPingRequest)
+	}
+}
+
+func TestDecodePacket_Empty(t *testing.T) {
+	_, err := DecodePacket([]byte{})
+	if err == nil {
+		t.Error("expected error for empty packet data, got nil")
+	}
+}
+
+func TestDecodePacket_Incomplete(t *testing.T) {
+	// Just a start byte - incomplete packet
+	_, err := DecodePacket([]byte{StartByte})
+	if err == nil {
+		t.Error("expected error for incomplete packet data, got nil")
 	}
 }
 
@@ -326,25 +346,25 @@ func TestNewPacketWithPayload(t *testing.T) {
 	}
 }
 
-func TestEncodePacket_FromPacket(t *testing.T) {
-	// Test the EncodePacket(p *Packet) []byte function
+func TestMustEncodePacket(t *testing.T) {
+	// Test the MustEncodePacket(p *Packet) []byte function
 	p := NewPacketWithPayload(0x1122334455667788, MsgStateData, map[int]interface{}{
 		0: false,
 		2: uint64(1),
 	})
 
-	encoded := EncodePacket(p)
+	encoded := MustEncodePacket(p)
 
 	if encoded[0] != StartByte || encoded[len(encoded)-1] != EndByte {
 		t.Error("packet framing incorrect")
 	}
 }
 
-func TestEncodePacket_Panic(t *testing.T) {
-	// Verify that EncodePacket panics on oversized payload as documented
+func TestMustEncodePacket_Panic(t *testing.T) {
+	// Verify that MustEncodePacket panics on oversized payload as documented
 	defer func() {
 		if r := recover(); r == nil {
-			t.Error("EncodePacket should panic on oversized payload")
+			t.Error("MustEncodePacket should panic on oversized payload")
 		}
 	}()
 
@@ -355,14 +375,14 @@ func TestEncodePacket_Panic(t *testing.T) {
 	}
 
 	p := NewPacketWithPayload(0, MsgStateData, largePayload)
-	EncodePacket(p) // Should panic
+	MustEncodePacket(p) // Should panic
 }
 
 func TestEncodePacket_MessageTypeBoundary(t *testing.T) {
 	// Test encoding with max message type value (0xFF)
-	encoded, err := EncodePacketFromValues(0x1234567890ABCDEF, 0xFF, nil)
+	encoded, err := EncodePacket(0x1234567890ABCDEF, 0xFF, nil)
 	if err != nil {
-		t.Fatalf("EncodePacketFromValues failed for msgType 0xFF: %v", err)
+		t.Fatalf("EncodePacket failed for msgType 0xFF: %v", err)
 	}
 
 	// Decode and verify
@@ -388,15 +408,15 @@ func TestEncodePacket_MessageTypeBoundary(t *testing.T) {
 
 func TestEncodePacket_ZeroLengthPayload(t *testing.T) {
 	// Test that nil payload produces correct length byte (0x00 for CBOR [type, nil])
-	encoded, err := EncodePacketFromValues(0x1234567890ABCDEF, MsgPingRequest, nil)
+	encoded, err := EncodePacket(0x1234567890ABCDEF, MsgPingRequest, nil)
 	if err != nil {
-		t.Fatalf("EncodePacketFromValues failed: %v", err)
+		t.Fatalf("EncodePacket failed: %v", err)
 	}
 
 	// Unstuff the packet content (between START and END bytes)
-	unstuffed, err := UnstuffBytes(encoded[1 : len(encoded)-1])
+	unstuffed, err := unstuffBytes(encoded[1 : len(encoded)-1])
 	if err != nil {
-		t.Fatalf("UnstuffBytes failed: %v", err)
+		t.Fatalf("unstuffBytes failed: %v", err)
 	}
 
 	// First byte after unstuffing is the length byte
@@ -464,9 +484,9 @@ func TestStuffBytes_ConsecutiveSpecialBytes(t *testing.T) {
 			}
 
 			// Also verify round-trip
-			unstuffed, err := UnstuffBytes(result)
+			unstuffed, err := unstuffBytes(result)
 			if err != nil {
-				t.Fatalf("UnstuffBytes error: %v", err)
+				t.Fatalf("unstuffBytes error: %v", err)
 			}
 			if !bytes.Equal(unstuffed, tt.input) {
 				t.Errorf("round-trip failed: got %v, want %v", unstuffed, tt.input)
@@ -482,7 +502,7 @@ func TestEncodePacket_CBOREncodingError(t *testing.T) {
 		0: make(chan int),
 	}
 
-	_, err := EncodePacketFromValues(0, MsgStateData, invalidPayload)
+	_, err := EncodePacket(0, MsgStateData, invalidPayload)
 	if err == nil {
 		t.Error("expected error for unencodable CBOR payload (channel), got nil")
 	}
