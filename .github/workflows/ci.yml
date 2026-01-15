@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: pkg/fusain/go.mod
+
+      - name: Install Task
+        uses: go-task/setup-task@v1
+
+      - name: CI (heliostat)
+        run: task ci
+
+      - name: CI (fusain)
+        run: task fusain:ci
