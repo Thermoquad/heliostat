@@ -1,5 +1,9 @@
 # Heliostat - AI Assistant Guide
 
+> **Note:** This file documents the Heliostat tool specifically.
+> Always read the [Thermoquad Organization CLAUDE.md](../../CLAUDE.md) first
+> for organization-wide structure and conventions.
+
 ## Project Overview
 
 Heliostat is a Go CLI tool for monitoring and analyzing Fusain protocol packets in real-time. It provides both raw packet logging and advanced error detection capabilities.
@@ -470,6 +474,36 @@ go mod tidy
 
 ---
 
+## Implementation Status & Roadmap
+
+### Currently Implemented ✅
+
+**Decoder & Analyzer:**
+- Packet decoding (decoder.go) - Complete state machine with byte unstuffing
+- Error detection mode - Real-time anomaly detection with statistics
+- TUI interface - Live visualization using Bubbletea
+- Protocol analyzer commands: `raw_log`, `error_detection`
+
+**Encoder & Commands:**
+- Packet encoder (encoder.go) - Creates wire-formatted packets with byte stuffing
+- Command builders (commands.go) - Helper functions for building Fusain command packets
+- Status: **Implemented and ready for controller mode**
+
+### Not Yet Implemented 🔲
+
+**Controller Mode CLI:**
+- Interactive TUI command for sending commands to Helios
+- Required for Helios verification tests (roadmap Tier 6)
+- Required for First Burn execution (roadmap Tier 7)
+- Building blocks exist (encoder + command builders), needs CLI integration
+
+**Roadmap Context:**
+- Controller mode is needed for the First Burn milestone
+- See `origin/documentation/source/development/roadmap/first-burn.rst` for full task breakdown
+- Controller mode is parallel work that can proceed while Stan implementation is in progress
+
+---
+
 ## Relationship to Other Projects
 
 ### Fusain Protocol Specification
@@ -596,10 +630,34 @@ Co-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>
 
 ## AI Assistant Operations
 
-To reload all organization CLAUDE.md files or run a content integrity check, see the **CLAUDE.md Reload** and **Content Integrity Check** sections in the [Thermoquad Organization CLAUDE.md](../../CLAUDE.md).
+### Content Integrity Check
+
+To verify consistency across all CLAUDE.md files in the organization, see the **Content Integrity Check** section in the [Thermoquad Organization CLAUDE.md](../../CLAUDE.md).
+
+**How to Request:** Ask the AI assistant to "run a content integrity check on all CLAUDE.md files"
+
+### Content Status Integrity Check
+
+To validate that this CLAUDE.md accurately reflects the actual Heliostat implementation, see the **Content Status Integrity Check** section in the [Thermoquad Organization CLAUDE.md](../../CLAUDE.md).
+
+**How to Request:** Ask the AI assistant to "run a content status integrity check on heliostat"
+
+**What Gets Checked for Heliostat:**
+- Go builder function count matches documentation (should be 6 command builders)
+- All documented Cobra commands exist in `cmd/` directory
+- pkg/fusain package structure matches documented files
+- Message type constants match Fusain specification
+- Validation rules match documented anomaly types
+- TUI components exist as documented
+- Build succeeds with `go build`
+- Tests pass with documented test commands
+
+### CLAUDE.md Reload
+
+To reload all organization CLAUDE.md files, see the **CLAUDE.md Reload** section in the [Thermoquad Organization CLAUDE.md](../../CLAUDE.md).
 
 ---
 
-**Last Updated:** 2026-01-11
+**Last Updated:** 2026-01-15
 
 **Maintainer:** Kaz Walker
