@@ -63,20 +63,37 @@ func MustEncodePacket(p *Packet) []byte {
 }
 
 // encodeCBORPayload creates the CBOR-encoded payload for a message.
+// Uses explicit 2-byte encoding for message type (0x18 prefix) to ensure
+// consistent wire format across implementations.
 func encodeCBORPayload(msgType uint8, payloadMap map[int]interface{}) ([]byte, error) {
-	var msg interface{}
-	if payloadMap == nil || len(payloadMap) == 0 {
-		msg = []interface{}{uint64(msgType), nil}
-	} else {
-		msg = []interface{}{uint64(msgType), payloadMap}
-	}
+	// Manually build CBOR to ensure consistent encoding:
+	// - Array of 2 elements: 0x82
+	// - Message type with 1-byte uint encoding: 0x18 <msgType>
+	// - Payload map (or null): marshaled by cbor library
 
-	data, err := cbor.Marshal(msg)
+	var result []byte
+
+	// Array header (2 elements)
+	result = append(result, 0x82)
+
+	// Message type with explicit 1-byte uint encoding (0x18 prefix)
+	// This ensures consistent wire format regardless of msgType value
+	result = append(result, 0x18, msgType)
+
+	// Encode payload map (or null)
+	var payloadBytes []byte
+	var err error
+	if payloadMap == nil || len(payloadMap) == 0 {
+		payloadBytes, err = cbor.Marshal(nil)
+	} else {
+		payloadBytes, err = cbor.Marshal(payloadMap)
+	}
 	if err != nil {
 		return nil, err
 	}
 
-	return data, nil
+	result = append(result, payloadBytes...)
+	return result, nil
 }
 
 // stuffBytes applies byte stuffing to escape special bytes.
