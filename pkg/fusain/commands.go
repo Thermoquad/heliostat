@@ -72,3 +72,21 @@ func NewGlowCommand(address uint64, glow uint8, durationMs int32) *Packet {
 	}
 	return NewPacketWithPayload(address, MsgGlowCommand, payload)
 }
+
+// NewDiscoveryRequest creates a DISCOVERY_REQUEST packet (0x1F).
+// Routers respond with DEVICE_ANNOUNCE for each known device, followed by
+// an end-of-discovery marker (DEVICE_ANNOUNCE with all zeros).
+func NewDiscoveryRequest(address uint64) *Packet {
+	return NewPacketWithPayload(address, MsgDiscoveryRequest, nil)
+}
+
+// NewDataSubscription creates a DATA_SUBSCRIPTION packet (0x14).
+// Tells a router to forward telemetry from the specified appliance to this controller.
+// The packet address should be the router's address (or broadcast/stateless).
+// The applianceAddress is the device whose telemetry you want to receive.
+func NewDataSubscription(routerAddress uint64, applianceAddress uint64) *Packet {
+	payload := map[int]interface{}{
+		0: applianceAddress,
+	}
+	return NewPacketWithPayload(routerAddress, MsgDataSubscription, payload)
+}

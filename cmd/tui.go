@@ -37,8 +37,7 @@ type telemetryData struct {
 
 // TUI model
 type model struct {
-	portName      string
-	baudRate      int
+	connInfo      string
 	statsInterval int
 	showAll       bool
 	stats         *fusain.Statistics
@@ -61,6 +60,10 @@ type serialDataMsg struct {
 }
 type syncMsg struct {
 	invalidBytes int
+}
+type batchDataMsg struct {
+	messages []serialDataMsg
+	syncMsg  *syncMsg
 }
 
 // formatUptime formats uptime in milliseconds to human-friendly string
@@ -138,10 +141,9 @@ func formatUptime(ms uint64) string {
 	return rest + ", and " + last
 }
 
-func initialModel(portName string, baudRate, statsInterval int, showAll bool) model {
+func initialModel(connInfo string, statsInterval int, showAll bool) model {
 	return model{
-		portName:      portName,
-		baudRate:      baudRate,
+		connInfo:      connInfo,
 		statsInterval: statsInterval,
 		showAll:       showAll,
 		stats:         fusain.NewStatistics(),
@@ -155,10 +157,7 @@ func initialModel(portName string, baudRate, statsInterval int, showAll bool) mo
 }
 
 func (m model) Init() tea.Cmd {
-	return tea.Batch(
-		tickCmd(),
-		tea.EnterAltScreen,
-	)
+	return tickCmd()
 }
 
 func tickCmd() tea.Cmd {
@@ -195,35 +194,55 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case serialDataMsg:
-		if msg.decodeErr != nil {
-			if m.synchronized {
-				m.stats.Update(nil, msg.decodeErr, nil)
-				m.addLogEntry(fmt.Sprintf("DECODE ERROR: %v", msg.decodeErr), true)
-			}
-		} else if msg.packet != nil {
-			m.stats.Update(msg.packet, nil, msg.validationErrors)
+		m.processSerialData(msg)
 
-			// Parse telemetry data
-			m.parseTelemetry(msg.packet)
-
-			if len(msg.validationErrors) > 0 {
-				// Validation errors
-				msgType := fusain.FormatMessageType(msg.packet.Type())
-				for _, err := range msg.validationErrors {
-					m.addLogEntry(fmt.Sprintf("%s: %s", msgType, err.Message), true)
-				}
-			} else if msg.packet.Type() == fusain.MsgPingResponse {
-				// Ping responses update telemetry silently (no log entry)
-				// The uptime will appear in the "Latest Telemetry" box
-			} else if m.showAll {
-				// Valid packet (only if --show-all)
-				msgType := fusain.FormatMessageType(msg.packet.Type())
-				m.addLogEntry(fmt.Sprintf("%s (valid)", msgType), false)
+	case batchDataMsg:
+		// Handle sync message first
+		if msg.syncMsg != nil {
+			m.synchronized = true
+			m.invalidBytes = msg.syncMsg.invalidBytes
+			if msg.syncMsg.invalidBytes > 0 {
+				m.addLogEntry(fmt.Sprintf("Synchronized after skipping %d invalid bytes", msg.syncMsg.invalidBytes), false)
+			} else {
+				m.addLogEntry("Synchronized", false)
 			}
+		}
+		// Process all batched messages
+		for _, data := range msg.messages {
+			m.processSerialData(data)
 		}
 	}
 
 	return m, nil
+}
+
+func (m *model) processSerialData(msg serialDataMsg) {
+	if msg.decodeErr != nil {
+		if m.synchronized {
+			m.stats.Update(nil, msg.decodeErr, nil)
+			m.addLogEntry(fmt.Sprintf("DECODE ERROR: %v", msg.decodeErr), true)
+		}
+	} else if msg.packet != nil {
+		m.stats.Update(msg.packet, nil, msg.validationErrors)
+
+		// Parse telemetry data
+		m.parseTelemetry(msg.packet)
+
+		if len(msg.validationErrors) > 0 {
+			// Validation errors
+			msgType := fusain.FormatMessageType(msg.packet.Type())
+			for _, err := range msg.validationErrors {
+				m.addLogEntry(fmt.Sprintf("%s: %s", msgType, err.Message), true)
+			}
+		} else if msg.packet.Type() == fusain.MsgPingResponse {
+			// Ping responses update telemetry silently (no log entry)
+			// The uptime will appear in the "Latest Telemetry" box
+		} else if m.showAll {
+			// Valid packet (only if --show-all)
+			msgType := fusain.FormatMessageType(msg.packet.Type())
+			m.addLogEntry(fmt.Sprintf("%s (valid)", msgType), false)
+		}
+	}
 }
 
 func (m *model) addLogEntry(message string, isError bool) {
@@ -260,22 +279,14 @@ func (m *model) parseTelemetry(packet *fusain.Packet) {
 			stateName = stateNames[state]
 		}
 
-		// Preserve uptime if we already have it from a PING_RESPONSE
-		uptime := uint64(0)
-		hasUptime := false
-		if m.lastTelemetry != nil && m.lastTelemetry.hasUptime {
-			uptime = m.lastTelemetry.uptime
-			hasUptime = true
+		// Update existing telemetry or create new one, preserving other fields
+		if m.lastTelemetry == nil {
+			m.lastTelemetry = &telemetryData{timestamp: time.Now()}
 		}
-
-		m.lastTelemetry = &telemetryData{
-			timestamp: time.Now(),
-			state:     state,
-			stateName: stateName,
-			errorCode: errorCode,
-			uptime:    uptime,
-			hasUptime: hasUptime,
-		}
+		m.lastTelemetry.state = state
+		m.lastTelemetry.stateName = stateName
+		m.lastTelemetry.errorCode = errorCode
+		m.lastTelemetry.timestamp = time.Now()
 
 	case fusain.MsgPingResponse:
 		// CBOR keys: 0=uptime
@@ -350,6 +361,8 @@ func (m model) View() string {
 		return "Shutting down...\n"
 	}
 
+	var s strings.Builder
+
 	// Styles
 	titleStyle := lipgloss.NewStyle().
 		Bold(true).
@@ -380,11 +393,10 @@ func (m model) View() string {
 		Padding(0, 1)
 
 	// Header
-	var s strings.Builder
 	s.WriteString(titleStyle.Render("HELIOSTAT - ERROR DETECTION"))
 	s.WriteString("\n")
-	s.WriteString(headerStyle.Render(fmt.Sprintf("Port: %s @ %d baud | Mode: %s | Press 'q' to quit",
-		m.portName, m.baudRate, func() string {
+	s.WriteString(headerStyle.Render(fmt.Sprintf("%s | Mode: %s | Press 'q' to quit",
+		m.connInfo, func() string {
 			if m.showAll {
 				return "All packets"
 			}
@@ -467,55 +479,60 @@ func (m model) View() string {
 	s.WriteString(boxStyle.Render(statsContent.String()))
 	s.WriteString("\n\n")
 
-	// Telemetry section (only shown if telemetry received)
+	// Telemetry section - always show fixed height layout
+	s.WriteString(statsLabelStyle.Render("Latest Telemetry:"))
+	s.WriteString("\n")
+
+	telemetryContent := strings.Builder{}
+
+	// State and error - always show (use defaults if no data)
+	stateName := "---            "
+	errorCode := int64(0)
 	if m.lastTelemetry != nil {
-		s.WriteString(statsLabelStyle.Render("Latest Telemetry:"))
-		s.WriteString("\n")
-
-		telemetryContent := strings.Builder{}
-
-		// State and error
-		telemetryContent.WriteString(fmt.Sprintf("%s %s   %s 0x%02X\n",
-			statsLabelStyle.Render("State:"), statsValueStyle.Render(m.lastTelemetry.stateName),
-			statsLabelStyle.Render("Error:"), m.lastTelemetry.errorCode,
-		))
-
-		// Uptime if available
-		if m.lastTelemetry.hasUptime {
-			uptimeStr := formatUptime(m.lastTelemetry.uptime)
-			telemetryContent.WriteString(fmt.Sprintf("%s %s\n",
-				statsLabelStyle.Render("Uptime:"), statsValueStyle.Render(uptimeStr),
-			))
-		}
-
-		// Motors
-		if len(m.lastTelemetry.motorRPM) > 0 {
-			for i, rpm := range m.lastTelemetry.motorRPM {
-				target := int64(0)
-				if i < len(m.lastTelemetry.motorTarget) {
-					target = m.lastTelemetry.motorTarget[i]
-				}
-				telemetryContent.WriteString(fmt.Sprintf("%s %s (target: %d)\n",
-					statsLabelStyle.Render(fmt.Sprintf("Motor %d:", i)),
-					statsValueStyle.Render(fmt.Sprintf("%d RPM", rpm)),
-					target,
-				))
-			}
-		}
-
-		// Temperatures
-		if len(m.lastTelemetry.temperatures) > 0 {
-			for i, temp := range m.lastTelemetry.temperatures {
-				telemetryContent.WriteString(fmt.Sprintf("%s %s\n",
-					statsLabelStyle.Render(fmt.Sprintf("Temp %d:", i)),
-					statsValueStyle.Render(fmt.Sprintf("%.1f°C", temp)),
-				))
-			}
-		}
-
-		s.WriteString(boxStyle.Render(telemetryContent.String()))
-		s.WriteString("\n\n")
+		stateName = fmt.Sprintf("%-15s", m.lastTelemetry.stateName)
+		errorCode = m.lastTelemetry.errorCode
 	}
+	telemetryContent.WriteString(fmt.Sprintf("%s %s   %s 0x%02X\n",
+		statsLabelStyle.Render("State:"), statsValueStyle.Render(stateName),
+		statsLabelStyle.Render("Error:"), errorCode,
+	))
+
+	// Uptime - always show line
+	uptimeStr := "---                                     "
+	if m.lastTelemetry != nil && m.lastTelemetry.hasUptime {
+		uptimeStr = fmt.Sprintf("%-40s", formatUptime(m.lastTelemetry.uptime))
+	}
+	telemetryContent.WriteString(fmt.Sprintf("%s %s\n",
+		statsLabelStyle.Render("Uptime:"), statsValueStyle.Render(uptimeStr),
+	))
+
+	// Motor 0 - always show
+	motorRPM := int64(0)
+	motorTarget := int64(0)
+	if m.lastTelemetry != nil && len(m.lastTelemetry.motorRPM) > 0 {
+		motorRPM = m.lastTelemetry.motorRPM[0]
+		if len(m.lastTelemetry.motorTarget) > 0 {
+			motorTarget = m.lastTelemetry.motorTarget[0]
+		}
+	}
+	telemetryContent.WriteString(fmt.Sprintf("%s %s (target: %5d)\n",
+		statsLabelStyle.Render("Motor 0:"),
+		statsValueStyle.Render(fmt.Sprintf("%5d RPM", motorRPM)),
+		motorTarget,
+	))
+
+	// Temp 0 - always show
+	temp := 0.0
+	if m.lastTelemetry != nil && len(m.lastTelemetry.temperatures) > 0 {
+		temp = m.lastTelemetry.temperatures[0]
+	}
+	telemetryContent.WriteString(fmt.Sprintf("%s %s\n",
+		statsLabelStyle.Render("Temp 0: "),
+		statsValueStyle.Render(fmt.Sprintf("%7.1f°C", temp)),
+	))
+
+	s.WriteString(boxStyle.Render(telemetryContent.String()))
+	s.WriteString("\n\n")
 
 	// Error log
 	s.WriteString(statsLabelStyle.Render("Recent Events:"))

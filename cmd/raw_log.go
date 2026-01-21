@@ -9,7 +9,6 @@ import (
 
 	"github.com/Thermoquad/heliostat/pkg/fusain"
 	"github.com/spf13/cobra"
-	"go.bug.st/serial"
 )
 
 var rawLogCmd = &cobra.Command{
@@ -18,7 +17,9 @@ var rawLogCmd = &cobra.Command{
 	Long: `Continuously decode and display Helios protocol packets as they arrive.
 
 This command provides the same output as the original heliostat tool, showing
-each packet with timestamp, message type, and decoded payload data.`,
+each packet with timestamp, message type, and decoded payload data.
+
+Supports both serial and WebSocket connections.`,
 	RunE: runRawLog,
 }
 
@@ -27,30 +28,29 @@ func init() {
 }
 
 func runRawLog(cmd *cobra.Command, args []string) error {
-	// Open serial port
-	mode := &serial.Mode{
-		BaudRate: baudRate,
-		DataBits: 8,
-		Parity:   serial.NoParity,
-		StopBits: serial.OneStopBit,
-	}
-
-	port, err := serial.Open(portName, mode)
+	// Open connection (serial or WebSocket)
+	conn, connInfo, err := OpenConnection()
 	if err != nil {
-		return fmt.Errorf("failed to open serial port %s: %v", portName, err)
+		return err
 	}
-	defer port.Close()
+	defer conn.Close()
 
 	fmt.Printf("Heliostat - Raw Packet Log\n")
-	fmt.Printf("Port: %s @ %d baud\n", portName, baudRate)
+	fmt.Printf("Connection: %s\n", connInfo)
 	fmt.Printf("Press Ctrl+C to exit\n\n")
 
 	decoder := fusain.NewDecoder()
 	buf := make([]byte, 128)
 
 	for {
-		n, err := port.Read(buf)
+		n, err := conn.Read(buf)
 		if err != nil {
+			// For WebSocket connections, a read error usually means
+			// the connection is permanently closed - exit gracefully
+			if err == ErrConnectionClosed {
+				log.Printf("Connection closed")
+				return nil
+			}
 			log.Printf("Read error: %v", err)
 			continue
 		}

@@ -5,13 +5,11 @@ package cmd
 
 import (
 	"fmt"
-	"log"
 	"time"
 
 	"github.com/Thermoquad/heliostat/pkg/fusain"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/spf13/cobra"
-	"go.bug.st/serial"
 )
 
 var (
@@ -34,7 +32,9 @@ This command validates each packet and detects:
 By default, only errors are displayed. Use --show-all to display valid packets too.
 
 Packets are validated in real-time, with errors highlighted immediately and
-periodic statistics summaries displayed at configurable intervals.`,
+periodic statistics summaries displayed at configurable intervals.
+
+Supports both serial and WebSocket connections.`,
 	RunE: runErrorDetection,
 }
 
@@ -46,24 +46,17 @@ func init() {
 }
 
 func runErrorDetection(cmd *cobra.Command, args []string) error {
-	// Open serial port
-	mode := &serial.Mode{
-		BaudRate: baudRate,
-		DataBits: 8,
-		Parity:   serial.NoParity,
-		StopBits: serial.OneStopBit,
-	}
-
-	port, err := serial.Open(portName, mode)
+	// Open connection (serial or WebSocket)
+	conn, connInfo, err := OpenConnection()
 	if err != nil {
-		return fmt.Errorf("failed to open serial port %s: %v", portName, err)
+		return err
 	}
-	defer port.Close()
+	defer conn.Close()
 
 	if useTUI {
-		return runTUIMode(port)
+		return runTUIMode(conn, connInfo)
 	}
-	return runTextMode(port)
+	return runTextMode(conn, connInfo)
 }
 
 // printDecodeError prints a decode error in highlighted format
@@ -164,23 +157,49 @@ func printValidationErrors(packet *fusain.Packet, errors []fusain.ValidationErro
 }
 
 // runTUIMode runs error detection in TUI mode
-func runTUIMode(port serial.Port) error {
+func runTUIMode(conn ByteReader, connInfo string) error {
 	decoder := fusain.NewDecoder()
 	synchronized := false
 	invalidBytesBeforeSync := 0
 
-	// Create TUI program
-	m := initialModel(portName, baudRate, statsInterval, showAll)
-	p := tea.NewProgram(m)
+	// Create TUI program with alt screen for flicker-free rendering
+	m := initialModel(connInfo, statsInterval, showAll)
+	p := tea.NewProgram(m, tea.WithAltScreen())
 
-	// Serial reader goroutine
+	// Done channel for shutdown signaling
+	done := make(chan struct{})
+
+	// Buffered channel for batching updates (prevents TUI glitches)
+	batchChan := make(chan serialDataMsg, 100)
+	syncChan := make(chan syncMsg, 1)
+
+	// Reader goroutine - decodes packets and sends to batch channel
 	go func() {
 		buf := make([]byte, 128)
 		for {
-			n, err := port.Read(buf)
+			// Check if we should stop
+			select {
+			case <-done:
+				return
+			default:
+			}
+
+			n, err := conn.Read(buf)
 			if err != nil {
-				log.Printf("Read error: %v", err)
-				continue
+				// Check if we're shutting down
+				select {
+				case <-done:
+					return
+				default:
+					// For WebSocket connections, a read error usually means
+					// the connection is permanently closed - exit gracefully
+					if err == ErrConnectionClosed {
+						return
+					}
+					// Brief pause before retry on transient errors (e.g., serial)
+					time.Sleep(10 * time.Millisecond)
+					continue
+				}
 			}
 
 			// Process bytes
@@ -191,11 +210,15 @@ func runTUIMode(port serial.Port) error {
 				if decodeErr != nil {
 					if synchronized {
 						// We're synced, this is a real error
-						p.Send(serialDataMsg{
+						select {
+						case batchChan <- serialDataMsg{
 							packet:           nil,
 							decodeErr:        decodeErr,
 							validationErrors: nil,
-						})
+						}:
+						default:
+							// Channel full, drop oldest by reading and discarding
+						}
 					} else {
 						// Not synced yet, just count invalid bytes
 						invalidBytesBeforeSync++
@@ -205,16 +228,61 @@ func runTUIMode(port serial.Port) error {
 					if !synchronized {
 						// First packet! We're now synchronized
 						synchronized = true
-						p.Send(syncMsg{invalidBytes: invalidBytesBeforeSync})
+						select {
+						case syncChan <- syncMsg{invalidBytes: invalidBytesBeforeSync}:
+						default:
+						}
 					}
 
 					// Validate packet
 					validationErrors := fusain.ValidatePacket(packet)
-					p.Send(serialDataMsg{
+					select {
+					case batchChan <- serialDataMsg{
 						packet:           packet,
 						decodeErr:        nil,
 						validationErrors: validationErrors,
-					})
+					}:
+					default:
+						// Channel full, drop message (TUI can't keep up)
+					}
+				}
+			}
+		}
+	}()
+
+	// Batch sender goroutine - sends batched updates to TUI at fixed rate
+	go func() {
+		ticker := time.NewTicker(50 * time.Millisecond) // 20 updates/sec max
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				var batch batchDataMsg
+
+				// Check for sync message
+				select {
+				case sync := <-syncChan:
+					batch.syncMsg = &sync
+				default:
+				}
+
+				// Drain all available messages from batch channel
+			drainLoop:
+				for {
+					select {
+					case msg := <-batchChan:
+						batch.messages = append(batch.messages, msg)
+					default:
+						break drainLoop
+					}
+				}
+
+				// Send batch if we have anything
+				if batch.syncMsg != nil || len(batch.messages) > 0 {
+					p.Send(batch)
 				}
 			}
 		}
@@ -222,16 +290,18 @@ func runTUIMode(port serial.Port) error {
 
 	// Run TUI
 	if _, err := p.Run(); err != nil {
+		close(done) // Signal goroutines to stop
 		return fmt.Errorf("TUI error: %v", err)
 	}
 
+	close(done) // Signal goroutines to stop
 	return nil
 }
 
 // runTextMode runs error detection in text mode (original behavior)
-func runTextMode(port serial.Port) error {
+func runTextMode(conn ByteReader, connInfo string) error {
 	fmt.Printf("Heliostat - Error Detection Mode\n")
-	fmt.Printf("Port: %s @ %d baud\n", portName, baudRate)
+	fmt.Printf("Connection: %s\n", connInfo)
 	fmt.Printf("Statistics interval: %d seconds\n", statsInterval)
 	if showAll {
 		fmt.Printf("Mode: All packets\n")
@@ -252,24 +322,24 @@ func runTextMode(port serial.Port) error {
 	statsTicker := time.NewTicker(time.Duration(statsInterval) * time.Second)
 	defer statsTicker.Stop()
 
-	// Channel for non-blocking serial reads
-	serialBuf := make(chan []byte, 10)
+	// Channel for non-blocking reads
+	dataBuf := make(chan []byte, 10)
 	go func() {
 		for {
-			n, err := port.Read(buf)
+			n, err := conn.Read(buf)
 			if err != nil {
-				log.Printf("Read error: %v", err)
-				continue
+				// Connection closed or error - exit goroutine silently
+				return
 			}
 			data := make([]byte, n)
 			copy(data, buf[:n])
-			serialBuf <- data
+			dataBuf <- data
 		}
 	}()
 
 	for {
 		select {
-		case data := <-serialBuf:
+		case data := <-dataBuf:
 			// Process bytes
 			for _, b := range data {
 				packet, decodeErr := decoder.DecodeByte(b)
